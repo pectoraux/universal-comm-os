@@ -1,0 +1,195 @@
+# ROADMAP.yaml — machine-readable roadmap
+# Consumed by the architecture dashboard and CI status checks.
+
+version: 1
+phases:
+  - id: P0
+    name: Constitutional Foundation
+    status: DONE
+    items:
+      - repository_structure
+      - north_star
+      - architecture_constitution
+      - architecture_ledger
+      - protocol_spec
+      - threat_model
+      - change_control
+      - roadmap
+      - architecture_tests_runner
+      - coding_conventions
+
+  - id: P1
+    name: Universal Protocol
+    status: DONE
+    items:
+      - universal_identity
+      - channel_identity
+      - intent
+      - communication_bundle
+      - conversation
+      - delivery_state_machine
+      - delivery_tracker
+      - capabilities
+      - routing_policy
+      - delivery_policy
+      - crypto_envelope
+      - router
+
+  - id: P2
+    name: Local Transport
+    status: DONE
+    items:
+      - transport_interface
+      - loopback_transport
+      - in_memory_bundle_store
+      - transport_negotiation
+
+  - id: P3
+    name: DTN
+    status: PENDING
+    items:
+      - persistent_bundle_store
+      - ttl_expiry_sweeper
+      - deduplication_index
+      - replication_policy
+      - multi_hop_forwarding
+      - routing_metadata_propagation
+
+  - id: P4
+    name: Android Edge
+    status: PENDING
+    items:
+      - bluetooth_transport
+      - ble_transport
+      - wifi_transport
+      - background_lifecycle
+      - notifications
+      - opportunistic_relay
+
+  - id: P5
+    name: Multi-hop Edge
+    status: PENDING
+    items:
+      - multi_hop_dtn
+      - capability_gossip
+
+  - id: P6
+    name: Internet Gateway
+    status: PENDING
+    items:
+      - dtn_to_internet_gateway
+      - bundle_ingress
+      - gateway_egress
+
+  - id: P7
+    name: Matrix Fabric
+    status: PENDING
+    items:
+      - matrix_client_adapter
+      - matrix_federation
+      - matrix_destination_resolution
+
+  - id: P8
+    name: External Channels
+    status: PENDING
+    items:
+      - email_adapter
+      - sms_adapter
+      - whatsapp_adapter
+      - rcs_adapter
+      - telegram_adapter
+      - instagram_adapter
+      - messenger_adapter
+
+  - id: P9
+    name: Intelligent Routing
+    status: PENDING
+    items:
+      - weighted_routing
+      - delivery_probability_estimation
+
+  - id: P10
+    name: Universal Identity Graph
+    status: PENDING
+    items:
+      - identity_linking
+      - channel_verification
+      - contact_resolution
+      - consent
+      - preferences
+
+  - id: P11
+    name: Consumer Application
+    status: PENDING
+    items:
+      - unified_inbox
+      - conversations
+      - contacts
+      - offline_queue
+      - network_state
+      - delivery_status
+      - gateway_visibility
+      - identity_management
+
+  - id: P12
+    name: Business Platform
+    status: PENDING
+    items:
+      - organizations
+      - teams
+      - shared_inboxes
+      - crm
+      - customer_profiles
+      - automation
+      - routing_policies
+      - templates
+      - analytics
+      - billing
+
+  - id: P13
+    name: Community Network
+    status: PENDING
+    items:
+      - relay_participation
+      - gateway_participation
+      - reputation
+      - verified_contribution
+      - resource_accounting
+
+  - id: P14
+    name: AI
+    status: PENDING
+    items:
+      - intent_interpretation
+      - routing_recommendations
+      - conversation_summarization
+      - automation_agents
+
+milestones:
+  - id: M1
+    name: First Technical Milestone
+    description: >
+      Encrypted Communication Bundle traverses
+      ANDROID A → ANDROID B → ANDROID C → GATEWAY → MATRIX → WEB/ELECTRON.
+      Destination distinguishes created → accepted → relayed → gateway reached → delivered → read.
+    depends_on: [P7, P6, P5, P4]
+    status: PENDING
+
+invariants:
+  - communication_is_transport_independent
+  - identity_is_channel_independent
+  - bundle_is_fundamental_routable_object
+  - matrix_is_one_fabric_among_potentially_many
+  - dtn_functions_without_internet_and_without_matrix
+  - routing_over_capabilities_not_device_types
+  - no_fake_implementations
+  - architecture_tests_machine_enforce_boundaries
+  - no_premature_complexity
+
+forbidden_until_acp:
+  - replacing_matrix
+  - replacing_dtn
+  - merging_architectural_layers
+  - token_economy
+  - ai_routing_authority
+  - protocol_redesign
