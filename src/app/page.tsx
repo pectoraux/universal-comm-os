@@ -8,6 +8,8 @@
  * directly. It calls only the server actions in `app/actions/commos.ts`.
  */
 
+import { useSession, signOut } from 'next-auth/react';
+import { useRouter } from 'next/navigation';
 import { useCallback, useEffect, useState } from 'react';
 import {
   getNetworkStateAction,
@@ -149,6 +151,8 @@ const STATE_COLORS: Record<string, string> = {
 };
 
 export default function Home() {
+  const { data: session, status } = useSession();
+  const router = useRouter();
   const { toast } = useToast();
   const [network, setNetwork] = useState<NetworkState | null>(null);
   const [nodes, setNodes] = useState<NodeDescriptor[]>([]);
@@ -217,12 +221,18 @@ export default function Home() {
     }, 0);
   }, [inboxNode]);
 
+  // Auth guard
   useEffect(() => {
-    // Initial load (NOT setState in effect body — wrapped in setTimeout via refresh).
+    if (status === 'loading') return;
+    if (!session) router.push('/auth/login');
+  }, [session, status, router]);
+
+  useEffect(() => {
+    if (status !== 'authenticated') return;
     const id = setInterval(refresh, 1500);
     void refresh();
     return () => clearInterval(id);
-  }, [refresh]);
+  }, [refresh, status]);
 
   const onDispatch = useCallback(async () => {
     if (recipientMode === 'identity' && fromNode === toNode) {
@@ -391,9 +401,13 @@ export default function Home() {
     toast({ title: 'Network reset' });
   }, [refresh, toast]);
 
+  if (status === 'loading' || !session) {
+    return <div className="min-h-screen flex items-center justify-center bg-slate-950 text-slate-400">Loading...</div>;
+  }
+
   return (
     <div className="min-h-screen flex flex-col bg-slate-950 text-slate-100">
-      <Header />
+      <Header session={session} onSignOut={() => signOut({ callbackUrl: '/auth/login' })} />
       <main className="flex-1 container mx-auto px-4 py-6 grid grid-cols-1 lg:grid-cols-3 gap-6">
         <section className="lg:col-span-2 space-y-6">
           <SimulationDisclaimer />
@@ -510,7 +524,7 @@ export default function Home() {
   );
 }
 
-function Header() {
+function Header({ session, onSignOut }: { session: any; onSignOut: () => void }) {
   return (
     <header className="border-b border-slate-800 bg-slate-900/50 backdrop-blur">
       <div className="container mx-auto px-4 py-4 flex items-center justify-between">
@@ -523,9 +537,20 @@ function Header() {
             <p className="text-xs text-slate-400">Communication independent of the network carrying it.</p>
           </div>
         </div>
-        <Badge variant="outline" className="border-emerald-500 text-emerald-400">
-          P0 · P1 · P2 · P3 · P5 · P6 · P8 · P9 · P10 · P11 · P12 · P13 · P14 live
-        </Badge>
+        <div className="flex items-center gap-3">
+          <Badge variant="outline" className="border-emerald-500 text-emerald-400">
+            P0 · P1 · P2 · P3 · P5 · P6 · P8 · P9 · P10 · P11 · P12 · P13 · P14 live
+          </Badge>
+          <div className="flex items-center gap-2 text-xs text-slate-400">
+            <span>{session?.user?.email}</span>
+            {(session?.user as any)?.role === 'admin' && (
+              <a href="/auth/admin" className="text-emerald-400 hover:underline">Admin</a>
+            )}
+            <Button size="sm" variant="outline" onClick={onSignOut} className="border-slate-700 text-slate-400 hover:bg-slate-800 text-xs h-7">
+              Sign Out
+            </Button>
+          </div>
+        </div>
       </div>
     </header>
   );

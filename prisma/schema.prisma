@@ -1,90 +1,127 @@
-// This is your Prisma schema file,
-// learn more about it in the docs: https://pris.ly/d/prisma-schema
-
-// Looking for ways to speed up your queries, or scale easily with serverless or edge functions?
-// Try Prisma Accelerate: https://pris.ly/cli/accelerate-init
+// Prisma schema for Universal Communication OS
+// PostgreSQL on Neon for production, SQLite for local dev
 
 generator client {
   provider = "prisma-client-js"
 }
 
 datasource db {
-  provider = "sqlite"
+  provider = "postgresql"
   url      = env("DATABASE_URL")
 }
 
+// ─── Authentication (NextAuth.js) ───────────────────────────────────────
+
 model User {
-  id        String   @id @default(cuid())
-  email     String   @unique
-  name      String?
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
+  id           String   @id @default(cuid())
+  email        String   @unique
+  name         String?
+  password     String?
+  role         String   @default("user") // "user" | "admin" | "demo"
+  waitlist     Boolean  @default(false)
+  approved     Boolean  @default(false)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  accounts     Account[]
+  sessions     Session[]
+
+  @@map("users")
 }
 
-model Post {
-  id        String   @id @default(cuid())
-  title     String
-  content   String?
-  published Boolean  @default(false)
-  authorId  String
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
+model Account {
+  id                String  @id @default(cuid())
+  userId            String
+  type              String
+  provider          String
+  providerAccountId String
+  refresh_token     String?
+  access_token      String?
+  expires_at        Int?
+  token_type        String?
+  scope             String?
+  id_token          String?
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([provider, providerAccountId])
+  @@map("accounts")
 }
 
-/// A Communication Bundle held in a node's DTN store-and-forward queue.
-/// (ARCH-003, Protocol §10, ROADMAP P3.1)
+model Session {
+  id           String   @id @default(cuid())
+  sessionToken String   @unique
+  userId       String
+  expires      DateTime
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("sessions")
+}
+
+model VerificationToken {
+  identifier String
+  token      String  @unique
+  expires    DateTime
+
+  @@unique([identifier, token])
+  @@map("verification_tokens")
+}
+
+// ─── Communication OS Protocol ─────────────────────────────────────────
+
 model StoredBundle {
-  // bundle_id is the canonical UUID assigned by the originating node.
-  bundle_id      String   @id
-  // Owning node (which DTN store this row belongs to).
-  node_id        String
-  // Next hop the bundle should be forwarded to (opaque node id).
-  next_hop       String
-  // Serialized CommunicationBundle (canonical JSON of the envelope; payload stays
-  // opaque base64url). We do NOT store plaintext.
-  bundle_json    String
-  // Bundle priority, denormalized for queue ordering.
-  priority       String
-  // Bundle expires_at (ms epoch), denormalized for the TTL sweeper.
-  expires_at     Int
-  // When the bundle was queued at this node.
-  queued_at      Int      @default(0)
-  // Delivery state at this node, denormalized for diagnostics.
-  state          String   @default("QUEUED")
+  bundle_id   String   @id
+  node_id     String
+  next_hop    String
+  bundle_json String
+  priority    String
+  expires_at  Int
+  queued_at   Int      @default(0)
+  state       String   @default("QUEUED")
 
   @@index([node_id, queued_at])
   @@index([expires_at])
   @@index([node_id, state])
+  @@map("stored_bundles")
 }
 
-/// Per-node "have I already seen this bundle" index. Implements Protocol §10
-/// deduplication across restarts. Survives process restarts.
 model ReceivedBundle {
-  // bundle_id is the canonical UUID.
-  bundle_id    String
-  // The node that received it.
-  node_id      String
-  // When the bundle was first received at this node.
-  received_at  Int     @default(0)
-  // The node the bundle was received from (for forensic / observability).
+  bundle_id   String
+  node_id     String
+  received_at Int     @default(0)
   from_node_id String?
 
   @@id([node_id, bundle_id])
   @@index([received_at])
+  @@map("received_bundles")
 }
 
-/// Delivery state event log per bundle, per node. Survives restarts.
-/// (ARCH-012 explicit multi-state machine, in persisted form.)
 model DeliveryEvent {
-  id           String   @id @default(cuid())
-  bundle_id    String
-  node_id      String
-  from_state   String?
-  to_state     String
-  ts           Int
-  transport    String?
-  note         String?
+  id          String   @id @default(cuid())
+  bundle_id   String
+  node_id     String
+  from_state  String?
+  to_state    String
+  ts          Int
+  transport   String?
+  note        String?
 
   @@index([bundle_id, node_id, ts])
   @@index([node_id, ts])
+  @@map("delivery_events")
+}
+
+// ─── Waitlist ──────────────────────────────────────────────────────────
+
+model WaitlistEntry {
+  id        String   @id @default(cuid())
+  email     String   @unique
+  name      String?
+  status    String   @default("pending") // "pending" | "approved" | "rejected"
+  createdAt DateTime @default(now())
+  approvedAt DateTime?
+  approvedBy String?
+
+  @@map("waitlist_entries")
 }
