@@ -452,6 +452,116 @@ class SimulatedNetwork {
     return this.activePolicy;
   }
 
+  // ──────────────────────────────────────────────────────────────────────
+  // P13: Community Network (ARCH-046, ARCH-047, ARCH-048).
+  //
+  // Per master prompt §19: "Never trust self-reported contribution.
+  // Contribution accounting must eventually rely upon verifiable evidence.
+  // Do not implement a token/credit economy prematurely."
+  //
+  // P13 measures participation from the delivery tracker's per-node state
+  // transitions — these are OBSERVABLE (the tracker records actual state
+  // changes per node per bundle). True VERIFIABLE evidence would come from
+  // RELAY_FORWARD proofs (signed by each relay's Ed25519 key), but those
+  // aren't currently stored centrally. The measurement is a first step;
+  // the anti-abuse + verifiable evidence layer is a future iteration.
+  //
+  // NO tokens, NO credits, NO economy — just measurement + reputation.
+  // ──────────────────────────────────────────────────────────────────────
+
+  /**
+   * P13: compute community network statistics from the delivery tracker.
+   * Per-node: how many bundles each node relayed, delivered, gateway-handled.
+   * Reputation: delivery success rate (DELIVERED / (DELIVERED + EXPIRED + NO_ROUTE)).
+   * Resource accounting: from the capability cache (battery, bandwidth, storage).
+   */
+  async getCommunityStats(): Promise<{
+    per_node: Array<{
+      node_id: string;
+      display_name: string;
+      roles: string[];
+      relayed: number;
+      delivered: number;
+      gateway_handled: number;
+      expired: number;
+      no_route: number;
+      reputation: number;
+      resource: { battery_pct?: number; bandwidth_bps?: number; storage_bytes?: number };
+      verification: string;
+    }>;
+    total_relays: number;
+    total_deliveries: number;
+    total_gateway_handling: number;
+    total_expired: number;
+    network_reliability: number;
+    /** Distinction between observable and verifiable evidence. */
+    evidence_note: string;
+  }> {
+    const snapshots = await this.deliverySnapshots();
+    const nodeEntries = this.listNodes();
+
+    const perNodeMap = new Map<string, {
+      relayed: number; delivered: number; gateway_handled: number; expired: number; no_route: number;
+    }>();
+
+    for (const snap of snapshots) {
+      const entry = perNodeMap.get(snap.node_id) ?? { relayed: 0, delivered: 0, gateway_handled: 0, expired: 0, no_route: 0 };
+      const state = snap.current;
+      if (state === 'DELIVERED' || state === 'READ') entry.delivered++;
+      else if (state === 'RELAYED') entry.relayed++;
+      else if (state === 'GATEWAY_REACHED' || state === 'EXTERNAL_ACCEPTED') entry.gateway_handled++;
+      else if (state === 'EXPIRED') entry.expired++;
+      else if (state === 'NO_ROUTE') entry.no_route++;
+      perNodeMap.set(snap.node_id, entry);
+    }
+
+    let totalRelays = 0;
+    let totalDeliveries = 0;
+    let totalGatewayHandling = 0;
+    let totalExpired = 0;
+
+    const perNode = nodeEntries.map((n) => {
+      const stats = perNodeMap.get(n.node_id) ?? { relayed: 0, delivered: 0, gateway_handled: 0, expired: 0, no_route: 0 };
+      totalRelays += stats.relayed;
+      totalDeliveries += stats.delivered;
+      totalGatewayHandling += stats.gateway_handled;
+      totalExpired += stats.expired;
+      // Reputation: delivery success rate (DELIVERED / (DELIVERED + EXPIRED + NO_ROUTE)).
+      const totalAttempts = stats.delivered + stats.expired + stats.no_route;
+      const reputation = totalAttempts > 0 ? stats.delivered / totalAttempts : 1.0;
+      return {
+        node_id: n.node_id,
+        display_name: n.display_name,
+        roles: n.roles,
+        relayed: stats.relayed,
+        delivered: stats.delivered,
+        gateway_handled: stats.gateway_handled,
+        expired: stats.expired,
+        no_route: stats.no_route,
+        reputation,
+        resource: {
+          battery_pct: n.capabilities.resource.battery_pct,
+          bandwidth_bps: n.capabilities.resource.bandwidth_bps,
+          storage_bytes: n.capabilities.resource.storage_bytes,
+        },
+        verification: n.capabilities.verification,
+      };
+    });
+
+    const totalAttempts = totalDeliveries + totalExpired;
+    const networkReliability = totalAttempts > 0 ? totalDeliveries / totalAttempts : 1.0;
+
+    return {
+      per_node: perNode.sort((a, b) => (b.relayed + b.delivered + b.gateway_handled) - (a.relayed + a.delivered + a.gateway_handled)),
+      total_relays: totalRelays,
+      total_deliveries: totalDeliveries,
+      total_gateway_handling: totalGatewayHandling,
+      total_expired: totalExpired,
+      network_reliability: networkReliability,
+      evidence_note: 'Observable: per-node delivery state transitions. Verifiable: RELAY_FORWARD proofs (Ed25519-signed). NO tokens, NO credits — measurement only per ARCH-048.',
+    };
+  }
+
   private setup() {
     // Three-loopback-bus fabric:
     //   bus-lan:  Alice <-> Relay <-> Bob (LAN)

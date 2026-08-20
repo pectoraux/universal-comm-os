@@ -148,7 +148,7 @@ phases:
 
   - id: P13
     name: Community Network
-    status: PENDING
+    status: DONE
     items:
       - relay_participation
       - gateway_participation

@@ -33,6 +33,7 @@ import {
   getAnalyticsAction,
   getRoutingPolicyAction,
   updateRoutingPolicyAction,
+  getCommunityStatsAction,
   aiInterpretIntentAction,
   aiSummarizeConversationAction,
 } from '@/app/actions/commos';
@@ -73,6 +74,7 @@ import {
   Mail,
   BarChart3,
   Sliders,
+  Globe,
   Sparkles,
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
@@ -166,6 +168,7 @@ export default function Home() {
   const [inboxNode, setInboxNode] = useState('bob');
   const [analytics, setAnalytics] = useState<any>(null);
   const [routingPolicy, setRoutingPolicy] = useState<any>(null);
+  const [communityStats, setCommunityStats] = useState<any>(null);
   const [aiSuggestion, setAiSuggestion] = useState<{ ok: boolean; suggestion?: any; reasoning?: string; error?: string } | null>(null);
   const [aiSummary, setAiSummary] = useState<{ conversation_id: string; summary: string } | null>(null);
 
@@ -180,7 +183,7 @@ export default function Home() {
   const [replicate, setReplicate] = useState(false);
 
   const refresh = useCallback(async () => {
-    const [n, ns, dl, q, ss, et, cc, ig, ib, an, rp, st, wt] = await Promise.all([
+    const [n, ns, dl, q, ss, et, cc, ig, ib, an, rp, st, wt, cs] = await Promise.all([
       getNetworkStateAction(),
       listNodesAction(),
       getDeliverySnapshotsAction(),
@@ -194,6 +197,7 @@ export default function Home() {
       getRoutingPolicyAction(),
       getSmsTranscriptAction(),
       getWhatsappTranscriptAction(),
+      getCommunityStatsAction(),
     ]);
     setTimeout(() => {
       setNetwork(n);
@@ -209,6 +213,7 @@ export default function Home() {
       Promise.resolve(rp).then((p) => setRoutingPolicy(p));
       Promise.resolve(st).then((s) => setSmsTranscript(s));
       Promise.resolve(wt).then((w) => setWhatsappTranscript(w));
+      Promise.resolve(cs).then((c) => setCommunityStats(c));
     }, 0);
   }, [inboxNode]);
 
@@ -477,6 +482,7 @@ export default function Home() {
           />
           <AnalyticsCard analytics={analytics} />
           <RoutingPolicyCard policy={routingPolicy} onUpdate={onUpdatePolicy} />
+          <CommunityNetworkCard stats={communityStats} />
           <DeliveryTimeline
             delivery={delivery}
             queues={queues}
@@ -517,7 +523,7 @@ function Header() {
           </div>
         </div>
         <Badge variant="outline" className="border-emerald-500 text-emerald-400">
-          P0 · P1 · P2 · P3 · P5 · P6 · P8 · P9 · P10 · P11 · P12 · P14 live
+          P0 · P1 · P2 · P3 · P5 · P6 · P8 · P9 · P10 · P11 · P12 · P13 · P14 live
         </Badge>
       </div>
     </header>
@@ -1537,6 +1543,78 @@ function RoutingPolicyCard({
   );
 }
 
+function CommunityNetworkCard({ stats }: { stats: any }) {
+  if (!stats) return null;
+  return (
+    <Card className="bg-slate-900/70 border-slate-800">
+      <CardHeader>
+        <CardTitle className="flex items-center gap-2 text-base">
+          <Globe className="w-4 h-4 text-cyan-400" />
+          Community Network (P13 — Participation + Reputation)
+        </CardTitle>
+        <CardDescription className="text-slate-400">
+          Relay participation, gateway handling, and reputation from observable delivery state. <span className="text-amber-400">NO tokens, NO credits</span> — measurement only per ARCH-048.
+        </CardDescription>
+      </CardHeader>
+      <CardContent className="space-y-4">
+        <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+          <StatBlock label="Total Relays" value={String(stats.total_relays)} color="cyan" />
+          <StatBlock label="Total Deliveries" value={String(stats.total_deliveries)} color="emerald" />
+          <StatBlock label="Gateway Handling" value={String(stats.total_gateway_handling)} color="purple" />
+          <StatBlock label="Network Reliability" value={`${(stats.network_reliability * 100).toFixed(1)}%`} color="emerald" />
+        </div>
+
+        <div>
+          <div className="text-xs uppercase tracking-wider text-slate-400 mb-2">Per-Node Participation</div>
+          <div className="space-y-2">
+            {stats.per_node.map((pn: any) => (
+              <div key={pn.node_id} className="rounded-lg border border-slate-800 bg-slate-950/50 p-3">
+                <div className="flex items-center justify-between mb-2">
+                  <div className="flex items-center gap-2">
+                    <Badge variant="outline" className="border-cyan-500 text-cyan-400 text-[10px] font-mono">{pn.node_id}</Badge>
+                    <span className="text-xs text-slate-400">{pn.display_name}</span>
+                    <div className="flex gap-1">
+                      {pn.roles.map((r: string) => (
+                        <Badge key={r} variant="outline" className="text-[9px] border-slate-600 text-slate-400">{r}</Badge>
+                      ))}
+                    </div>
+                  </div>
+                  <Badge variant="outline" className={cn(
+                    'text-[10px]',
+                    pn.reputation >= 0.8 ? 'border-emerald-500 text-emerald-400' :
+                    pn.reputation >= 0.5 ? 'border-amber-500 text-amber-400' :
+                    'border-red-500 text-red-400',
+                  )}>
+                    Rep: {(pn.reputation * 100).toFixed(0)}%
+                  </Badge>
+                </div>
+                <div className="grid grid-cols-2 md:grid-cols-5 gap-2 text-xs font-mono">
+                  <div><span className="text-slate-500">Relayed:</span> <span className="text-cyan-400">{pn.relayed}</span></div>
+                  <div><span className="text-slate-500">Delivered:</span> <span className="text-emerald-400">{pn.delivered}</span></div>
+                  <div><span className="text-slate-500">Gateway:</span> <span className="text-purple-400">{pn.gateway_handled}</span></div>
+                  <div><span className="text-slate-500">Expired:</span> <span className="text-red-400">{pn.expired}</span></div>
+                  <div><span className="text-slate-500">No Route:</span> <span className="text-slate-400">{pn.no_route}</span></div>
+                </div>
+                {pn.resource.battery_pct !== undefined && (
+                  <div className="mt-2 text-[10px] font-mono text-slate-500">
+                    Battery: {pn.resource.battery_pct}% | BW: {pn.resource.bandwidth_bps ? `${(pn.resource.bandwidth_bps / 1_000_000).toFixed(1)} Mbps` : 'n/a'} | Storage: {pn.resource.storage_bytes ? `${(pn.resource.storage_bytes / 1_000_000_000).toFixed(1)} GB` : 'n/a'} | Verification: {pn.verification}
+                  </div>
+                )}
+              </div>
+            ))}
+          </div>
+        </div>
+
+        <div className="rounded-lg border border-amber-700/30 bg-amber-950/10 p-3">
+          <div className="text-[10px] text-amber-400 font-mono leading-relaxed">
+            {stats.evidence_note}
+          </div>
+        </div>
+      </CardContent>
+    </Card>
+  );
+}
+
 function DeliveryTimeline({
   delivery,
   queues,
@@ -1775,7 +1853,7 @@ function RoadmapCard() {
     { id: 'P10', name: 'Universal Identity Graph', status: 'DONE' },
     { id: 'P11', name: 'Consumer Application', status: 'DONE' },
     { id: 'P12', name: 'Business Platform', status: 'DONE' },
-    { id: 'P13', name: 'Community Network', status: 'PENDING' },
+    { id: 'P13', name: 'Community Network', status: 'DONE' },
     { id: 'P14', name: 'AI', status: 'DONE' },
   ];
   return (
@@ -1848,7 +1926,7 @@ function Footer({ onReset }: { onReset: () => void }) {
     <footer className="mt-auto border-t border-slate-800 bg-slate-900/50">
       <div className="container mx-auto px-4 py-3 flex items-center justify-between">
         <div className="text-[10px] text-slate-500 font-mono">
-          bundle → transport → destination (no Internet required) · ARCH-001..045 · tested in CI
+          bundle → transport → destination (no Internet required) · ARCH-001..048 · tested in CI
         </div>
         <Button size="sm" variant="outline" onClick={onReset} className="border-slate-700 text-slate-400 hover:bg-slate-800 text-xs">
           Reset Network

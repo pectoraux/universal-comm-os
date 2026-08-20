@@ -154,6 +154,13 @@ export async function updateRoutingPolicyAction(updates: Record<string, any>) {
   return net.updateRoutingPolicy(updates as any);
 }
 
+// P13 — Community Network
+
+export async function getCommunityStatsAction() {
+  const net = getNetwork();
+  return net.getCommunityStats();
+}
+
 // P14 — AI (assistive, not authoritative)
 // Per master prompt: AI may assist with intent interpretation, routing
 // recommendations, conversation summarization. AI MUST NOT become authority

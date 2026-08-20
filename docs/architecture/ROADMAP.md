@@ -113,13 +113,15 @@ Implementation sequencing per the master prompt. Vertical from the protocol outw
 - [ ] Automation + templates (deferred)
 - [ ] Billing (deferred — per ARCH-020, no premature complexity)
 
-## P13 — Community Network
-- [ ] Relay participation
-- [ ] Gateway participation
-- [ ] Reputation
-- [ ] Verified contribution measurement
-- [ ] Resource accounting
-- (No token economy until verified contribution measurement is real.)
+## P13 — Community Network  (DONE in this iteration — participation + reputation, NO token economy)
+- [x] Relay participation tracking: counts per-node RELAYED state transitions from the delivery tracker
+- [x] Gateway participation tracking: counts per-node GATEWAY_REACHED + EXTERNAL_ACCEPTED transitions
+- [x] Reputation: delivery success rate (DELIVERED / (DELIVERED + EXPIRED + NO_ROUTE)) per node + network-wide
+- [x] Resource accounting: battery, bandwidth, storage from capability advertisements (self-reported; noted as UNVERIFIED per THREAT_MODEL)
+- [x] Evidence note: distinguishes OBSERVABLE (delivery state transitions) from VERIFIABLE (RELAY_FORWARD proofs — Ed25519-signed, not yet centrally stored)
+- [x] **NO tokens, NO credits, NO economy** — measurement only per ARCH-048 and master prompt §19
+- [ ] Verifiable contribution measurement from RELAY_FORWARD proofs (future — needs central proof storage)
+- [ ] Anti-abuse mechanisms (future — Sybil detection, reputation decay)
 
 ## P14 — AI  (DONE in this iteration — intent interpretation + conversation summarization)
 - [x] AI intent interpretation: `aiInterpretIntentAction(plaintext)` uses z-ai-web-dev-sdk to analyze the user's natural-language message and suggest a structured Intent (type, priority, TTL, privacy). The AI SUGGESTS; the user CONFIRMS before dispatch.
