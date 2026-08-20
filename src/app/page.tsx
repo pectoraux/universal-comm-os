@@ -114,6 +114,10 @@ interface QueuedBundle {
 interface DispatchResponse {
   status: 'DISPATCHED' | 'QUEUED' | 'NO_ROUTE' | 'BUNDLE_EXPIRED' | 'ERROR';
   bundle_id?: string;
+  // S0.2.4 — added `replicas_sent` to match the server-side DispatchResponse
+  // (src/server/CommOS.ts line 99). The page.tsx local interface was missing
+  // this field, causing `lastDispatch.replicas_sent` to be a type error.
+  replicas_sent?: number;
   route_plan?: {
     hops: Array<{
       kind: string;
@@ -149,6 +153,30 @@ const STATE_COLORS: Record<string, string> = {
   GATEWAY_UNAVAILABLE: 'bg-orange-700',
   DESTINATION_UNKNOWN: 'bg-red-600',
 };
+
+// S0.2.4 — Result type narrowing helper.
+// Server actions return Promise<Result<T>> where:
+//   Result<T> = { ok: true; data: T } | { ok: false; error: string; code: string }.
+//
+// The page.tsx previously accessed `.data`, `.status`, `.plaintext`, etc. directly
+// on the Result<T> without narrowing on `.ok`, which TypeScript correctly flags
+// as type errors. `unwrap()` returns the inner data if ok, null otherwise — the
+// page treats null as "show nothing".
+//
+// Implementation note: the structural `'data' in r` check is more robust than
+// `r.ok ? r.data : null` because TypeScript's discriminated-union narrowing
+// on `r.ok` fails when the union has multiple `ok: false` branches with
+// different literal `code` values (e.g., `code: 'FORBIDDEN'` from an early
+// return vs `code: string` from withAuth's catch). The `in` check narrows
+// based on the presence of the `data` key, which works regardless of the
+// `code` literal type.
+
+type ActionResult<T> = { ok: true; data: T } | { ok: false; error: string; code: string };
+
+function unwrap<T>(r: ActionResult<T>): T | null {
+  if (r && typeof r === 'object' && 'data' in r) return (r as { data: T }).data;
+  return null;
+}
 
 export default function Home() {
   const { data: session, status } = useSession();
@@ -204,20 +232,20 @@ export default function Home() {
       getCommunityStatsAction(),
     ]);
     setTimeout(() => {
-      setNetwork(n);
-      setNodes(ns as NodeDescriptor[]);
-      Promise.resolve(dl).then((d) => setDelivery(d));
-      Promise.resolve(q).then((qq) => setQueues(qq));
-      setSweeperStatus(ss as any);
-      setEmailTranscript(et as any);
-      setCapabilityCaches(cc as any);
-      setIdentityGraph(ig as any);
-      Promise.resolve(ib).then((i) => setInbox(i as any));
-      Promise.resolve(an).then((a) => setAnalytics(a));
-      Promise.resolve(rp).then((p) => setRoutingPolicy(p));
-      Promise.resolve(st).then((s) => setSmsTranscript(s));
-      Promise.resolve(wt).then((w) => setWhatsappTranscript(w));
-      Promise.resolve(cs).then((c) => setCommunityStats(c));
+      setNetwork(unwrap(n));
+      setNodes((unwrap(ns) as NodeDescriptor[] | null) ?? []);
+      Promise.resolve(dl).then((d) => setDelivery((unwrap(d) as DeliverySnapshot[] | null) ?? []));
+      Promise.resolve(q).then((qq) => setQueues((unwrap(qq) as QueuedBundle[] | null) ?? []));
+      setSweeperStatus(unwrap(ss) as any);
+      setEmailTranscript(unwrap(et) as any);
+      setCapabilityCaches(unwrap(cc) as any);
+      setIdentityGraph(unwrap(ig) as any);
+      Promise.resolve(ib).then((i) => setInbox(unwrap(i) as any));
+      Promise.resolve(an).then((a) => setAnalytics(unwrap(a)));
+      Promise.resolve(rp).then((p) => setRoutingPolicy(unwrap(p)));
+      Promise.resolve(st).then((s) => setSmsTranscript((unwrap(s) as any[] | null) ?? []));
+      Promise.resolve(wt).then((w) => setWhatsappTranscript((unwrap(w) as any[] | null) ?? []));
+      Promise.resolve(cs).then((c) => setCommunityStats(unwrap(c)));
     }, 0);
   }, [inboxNode]);
 
@@ -252,20 +280,27 @@ export default function Home() {
       req.to_channel = { channel: recipientMode.toUpperCase() as any, channel_id: toEmail };
     }
     const res = await dispatchBundleAction(req);
-    setLastDispatch(res);
-    if (res.status === 'DISPATCHED' || res.status === 'QUEUED') {
+    const d = unwrap(res);
+    setLastDispatch(d);
+    if (d && (d.status === 'DISPATCHED' || d.status === 'QUEUED')) {
       toast({
-        title: `Bundle ${res.status.toLowerCase()}`,
-        description: res.replicas_sent
-          ? `Replicated to ${res.replicas_sent} peer(s) — first delivery wins.`
-          : res.route_plan
-            ? `${res.route_plan.hops.length} hop(s): ${res.route_plan.rationale.slice(0, 80)}...`
+        title: `Bundle ${d.status.toLowerCase()}`,
+        description: d.replicas_sent
+          ? `Replicated to ${d.replicas_sent} peer(s) — first delivery wins.`
+          : d.route_plan
+            ? `${d.route_plan.hops.length} hop(s): ${d.route_plan.rationale.slice(0, 80)}...`
             : 'Queued for later delivery (DTN semantics).',
       });
-      if (res.bundle_id) setSelectedBundleId(res.bundle_id);
-    } else {
+      if (d?.bundle_id) setSelectedBundleId(d.bundle_id);
+    } else if (d) {
       toast({
-        title: `Dispatch failed: ${res.status}`,
+        title: `Dispatch failed: ${d.status}`,
+        description: d.error || '',
+        variant: 'destructive',
+      });
+    } else if (!res.ok) {
+      toast({
+        title: 'Dispatch failed',
         description: res.error,
         variant: 'destructive',
       });
@@ -276,11 +311,11 @@ export default function Home() {
   const onTryDecrypt = useCallback(async () => {
     if (!selectedBundleId) return;
     const res = await tryDecryptBundleAction(selectedBundleId, toNode);
-    setDecryptResult(res);
+    setDecryptResult(res.ok ? { ok: true, plaintext: (res.data as any)?.plaintext } : { ok: false, reason: res.error });
     if (res.ok) {
-      toast({ title: 'Decrypted', description: `Recipient opened the bundle. Plaintext: ${res.plaintext?.slice(0, 60)}...` });
+      toast({ title: 'Decrypted', description: `Recipient opened the bundle. Plaintext: ${(res.data as any)?.plaintext?.slice(0, 60)}...` });
     } else {
-      toast({ title: 'Cannot decrypt', description: res.reason, variant: 'destructive' });
+      toast({ title: 'Cannot decrypt', description: res.error, variant: 'destructive' });
     }
     await refresh();
   }, [selectedBundleId, toNode, toast, refresh]);
@@ -291,16 +326,17 @@ export default function Home() {
     if (res.ok) {
       toast({ title: 'Marked READ' });
     } else {
-      toast({ title: 'Could not mark READ', description: res.reason, variant: 'destructive' });
+      toast({ title: 'Could not mark READ', description: res.error, variant: 'destructive' });
     }
     await refresh();
   }, [selectedBundleId, toNode, toast, refresh]);
 
   const onSweepOnce = useCallback(async () => {
     const res = await sweepOnceAction();
+    const d = unwrap(res) as any;
     toast({
       title: `TTL sweep ran`,
-      description: `Expired ${res.expired_count} bundle(s).`,
+      description: `Expired ${d?.expired_count ?? 0} bundle(s).`,
     });
     await refresh();
   }, [toast, refresh]);
@@ -308,12 +344,13 @@ export default function Home() {
   const onViewProofs = useCallback(async () => {
     if (!selectedBundleId) return;
     const res = await getRelayForwardProofsAction(selectedBundleId);
-    setProofsView(res ?? null);
-    if (res) {
-      const relayCount = res.proofs.filter((p) => p.kind === 'RELAY_FORWARD').length;
+    const d = unwrap(res);
+    setProofsView(d ?? null);
+    if (d) {
+      const relayCount = d.proofs.filter((p) => p.kind === 'RELAY_FORWARD').length;
       toast({
         title: `Proof chain`,
-        description: `${res.proofs.length} proof(s): 1 sender + ${relayCount} relay forward(s)`,
+        description: `${d.proofs.length} proof(s): 1 sender + ${relayCount} relay forward(s)`,
       });
     }
   }, [selectedBundleId, toast]);
@@ -337,13 +374,13 @@ export default function Home() {
   const onMarkConversationRead = useCallback(async (conversation_id: string) => {
     const res = await markConversationReadAction(inboxNode, conversation_id);
     if (res.ok) {
-      toast({ title: `Marked ${res.marked} message(s) as read` });
+      toast({ title: `Marked ${(res.data as any)?.marked ?? 0} message(s) as read` });
     }
     await refresh();
   }, [inboxNode, toast, refresh]);
 
   const onUpdatePolicy = useCallback(async (updates: Record<string, any>) => {
-    const res = await updateRoutingPolicyAction(updates);
+    await updateRoutingPolicyAction(updates);
     toast({ title: `Routing policy updated`, description: `Changes affect subsequent dispatches only.` });
     await refresh();
   }, [toast, refresh]);
@@ -352,13 +389,14 @@ export default function Home() {
   const onAiInterpretIntent = useCallback(async () => {
     setAiSuggestion({ ok: false } as any); // loading
     const res = await aiInterpretIntentAction(plaintext);
-    setAiSuggestion(res);
-    if (res.ok && res.suggestion) {
+    const d = unwrap(res) as any;
+    setAiSuggestion(res.ok ? { ok: true, suggestion: d?.suggestion } : { ok: false, error: res.error });
+    if (res.ok && d?.suggestion) {
       toast({
-        title: `AI suggests: ${res.suggestion.type}`,
-        description: res.suggestion.reasoning ?? 'Review the suggestion and accept to apply.',
+        title: `AI suggests: ${d.suggestion.type}`,
+        description: d.suggestion.reasoning ?? 'Review the suggestion and accept to apply.',
       });
-    } else {
+    } else if (!res.ok) {
       toast({ title: `AI interpretation failed`, description: res.error, variant: 'destructive' });
     }
   }, [plaintext, toast]);
@@ -383,7 +421,8 @@ export default function Home() {
     }));
     const res = await aiSummarizeConversationAction(messages);
     if (res.ok) {
-      setAiSummary({ conversation_id, summary: res.summary });
+      const d = unwrap(res) as any;
+      setAiSummary({ conversation_id, summary: d?.summary ?? '' });
       toast({ title: `AI summary generated` });
     } else {
       setAiSummary(null);

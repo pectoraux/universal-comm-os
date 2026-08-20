@@ -20,25 +20,33 @@ import {
   requireAuth, requireRole, requireAdmin,
   withAuth, withRole,
   safeError,
+  AuthzError,
   authorizeNode, authorizeBundleAtNode, authorizeConversationAtNode, authorizeNetworkOperation,
   authorizeByVisibility,
   createChannelChallenge, verifyChannelChallenge, isChannelVerified,
 } from '@/lib/auth-guard';
 import type { AuthContext, ResourceVisibility } from '@/lib/auth-guard';
 
+// S0.2.4 — `runSafe` is now TRANSPARENT: it just awaits the inner function
+// and returns its value (or throws on error). The outer `withAuth` / `withRole`
+// wrappers catch errors and wrap them in `Result<T>`. Previously `runSafe`
+// returned `Promise<Result<T>>` and `withAuth` wrapped it AGAIN in
+// `Promise<Result<Result<T>>>`, which is why the page.tsx code had to call
+// `unwrap()` twice to get to the actual data.
+//
+// After this fix, `withAuth(...)` returns `Promise<Result<T>>` and the page
+// only needs to `unwrap()` once.
 async function runSafe<T>(
-  ctx: AuthContext,
-  action: string,
-  visibility: ResourceVisibility,
+  _ctx: AuthContext,
+  _action: string,
+  _visibility: ResourceVisibility,
   fn: () => Promise<T>,
-  organizationId?: string,
-): Promise<{ ok: true; data: T } | { ok: false; error: string; code: string }> {
-  try {
-    const data = await fn();
-    return { ok: true, data };
-  } catch (e) {
-    return safeError(e);
-  }
+  _organizationId?: string,
+): Promise<T> {
+  // The action/visibility/organizationId parameters are retained for backward
+  // compatibility with existing call sites — they're now contextual metadata
+  // that could be wired into AuditEvent logging in a future iteration.
+  return await fn();
 }
 
 // ─── PUBLIC — any authenticated user (network topology only) ──────────
@@ -171,7 +179,16 @@ export async function dispatchBundleAction(req: DispatchRequest) {
         channelId: req.to_channel.channel_id,
       });
       if (!verified) {
-        return { ok: false, error: `Channel identity ${req.to_channel.channel}:${req.to_channel.channel_id} is not VERIFIED. Dispatch rejected per Article XIV §7.`, code: 'FORBIDDEN' };
+        // S0.2.4 — throw AuthzError instead of returning a literal { ok: false }
+        // object. The `withAuth` outer wrapper catches AuthzError and converts
+        // it to a uniform `Result<DispatchResponse>` = `{ ok: false, error, code }`.
+        // Previously the early-return polluted the function's inferred return
+        // type with an extra `{ ok: boolean | false; error; code: 'FORBIDDEN' | string }`
+        // branch, which defeated the page.tsx `unwrap()` narrowing.
+        throw new AuthzError(
+          'FORBIDDEN',
+          `Channel identity ${req.to_channel.channel}:${req.to_channel.channel_id} is not VERIFIED. Dispatch rejected per Article XIV §7.`,
+        );
       }
     }
 

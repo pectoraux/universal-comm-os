@@ -26,7 +26,6 @@ import {
   verifyProof,
   defaultPolicy,
   advertiseCapabilities,
-  createInMemoryBundleStore,
   createCapabilityCache,
   type UniversalIdentity,
   type CommunicationBundle,

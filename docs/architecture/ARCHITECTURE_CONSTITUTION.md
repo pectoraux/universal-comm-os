@@ -149,39 +149,129 @@ The IdentityLink state machine defined in `src/core/identity/IdentityLinkStateMa
 7. **The `link()` method on `IdentityGraph` MUST produce a link in `ASSERTED` state**, not `VERIFIED`. A signed `CHANNEL_OWNERSHIP` proof attests an assertion (the identity claims ownership); it does NOT prove channel control. Advancing to `VERIFIED` requires the channel owner to complete an in-band challenge-response through the actual target channel.
 8. **Demo / test bootstrap MAY use a fast-path** (`linkIdentityToChannelVerifiedForDemo()` on `CommOS`) that asserts AND verifies in a single call. The transition still goes through the canonical state machine (`ASSERT` then `VERIFY`). The fast-path MUST be clearly named and gated so production callers cannot accidentally use it.
 
-## Article XVI — Repository Truth Gate (S0.2.3)
+## Article XVI — Repository Truth Gate (S0.2.3, S0.2.4)
 
 An agent's report that a milestone is "complete" is not verifiable unless the implementation that produced the test results is identical to the implementation in the authoritative repository branch. Local-only implementation that passes tests is not "complete" — it is "unpushed work" and counts as a governance failure.
 
-Before declaring ANY milestone (S0.X, Pn) COMPLETE, the agent MUST execute the Repository Truth Gate in this exact order:
+The gate has TWO modes, each with its own SHA-equality invariant:
 
-1. **Run the full acceptance suite** (`bun run vitest --run`). Record pass count.
-2. **Record the tested commit SHA** = `git rev-parse HEAD` of the working tree at test time.
-3. **Verify the worktree is clean** = `git status --porcelain` returns empty. If dirty, the test results do not correspond to a specific commit — STOP and either commit or stash before re-running tests.
-4. **Commit all changes** if any uncommitted work exists. Commit messages must reference the milestone ID (e.g., `S0.2.2 — canonical state machine`).
-5. **Push to GitHub** = `git push origin main` (or the milestone's target branch). The push must succeed without rejection.
-6. **Fetch GitHub main HEAD** = `git fetch origin` then `git rev-parse origin/main`.
-7. **Assert** `local HEAD == origin/main HEAD == tested commit SHA`. All three must be equal. If any pair differs, the milestone is NOT complete.
-8. **Produce the COMMIT REPORT** in the milestone completion message:
+### Mode 1: MAIN_MILESTONE
+
+For declaring a milestone (S0.X, Pn) COMPLETE on the `main` branch.
+
+Invariant: `local HEAD == origin/main HEAD == tested commit SHA`. All three must be equal.
+
+Used on:
+- Push events to `main` (CI runs the gate in MAIN_MILESTONE mode automatically).
+- Manual invocation: `bash scripts/repo-truth-gate.sh MAIN_MILESTONE <milestone-id>` before declaring a milestone complete.
+
+### Mode 2: PR_INTEGRITY
+
+For verifying a pull request's integrity BEFORE merge.
+
+Invariant: `tested SHA == checked-out HEAD (== github.sha in CI)`. Origin/main is NOT consulted — the PR's commit has by definition not yet been merged into main.
+
+Used on:
+- `pull_request` events targeting `main` (CI runs the gate in PR_INTEGRITY mode automatically).
+- Manual invocation: `bash scripts/repo-truth-gate.sh PR_INTEGRITY <pr-id>` before requesting review on a PR.
+
+### Common requirements (both modes)
+
+1. **Working tree clean** — `git status --porcelain` returns empty. If dirty, the test results do not correspond to a specific commit — STOP and either commit or stash before re-running tests.
+2. **Full test suite passes** at HEAD (`bun run vitest --run`).
+3. **Architecture tests pass** at HEAD — FATAL (previously advisory in S0.2.3 with `|| true`; made FATAL in S0.2.4).
+4. **Security tests pass** at HEAD (`tests/architecture/s0-security.test.ts`) — FATAL (split out as a dedicated subset in S0.2.4 so a security failure cannot be hidden inside an aggregate pass).
+5. **Typecheck passes** at HEAD (`npx tsc --noEmit`) — FATAL (previously `continue-on-error: true` in the CI workflow; made FATAL in S0.2.4 so type drift cannot accumulate while tests pass).
+6. **HEAD did not move during tests** — the SHA at end of the gate run must equal the SHA recorded before the run.
+
+### MAIN_MILESTONE procedure
+
+1. Run the full acceptance suite. Record pass count.
+2. Record the tested commit SHA = `git rev-parse HEAD` of the working tree at test time.
+3. Verify the worktree is clean.
+4. Commit all changes if any uncommitted work exists. Commit messages must reference the milestone ID.
+5. Push to GitHub (`git push origin main`). The push must succeed without rejection.
+6. Fetch GitHub main HEAD (`git fetch origin` then `git rev-parse origin/main`).
+7. Assert `local HEAD == origin/main HEAD == tested commit SHA`. All three must be equal. If any pair differs, the milestone is NOT complete.
+8. Produce the COMMIT REPORT in the milestone completion message.
+
+### PR_INTEGRITY procedure
+
+1. Run the full acceptance suite. Record pass count.
+2. Record the tested commit SHA = `git rev-parse HEAD` of the working tree at test time.
+3. Verify the worktree is clean.
+4. Assert `tested SHA == checked-out HEAD`. (In CI, github.sha == checked-out HEAD, so this is `tested SHA == github.sha`.)
+5. Do NOT consult `origin/main`. The PR's commit is by definition not yet on main.
+6. Produce the COMMIT REPORT in the PR description.
+
+### COMMIT REPORT format (both modes)
 
 ```
-MILESTONE: <id>
-LOCAL HEAD:     <sha>
-GITHUB main:    <sha>
-TESTED SHA:     <sha>
-MATCH:          YES | NO
-WORKTREE CLEAN: YES | NO
-TEST RESULT:    <N> passed / <N> failed
-ARCHITECTURE:   <N> passed / <N> failed
-BUILD/CHECK:    PASS | FAIL
-FILES ADDED:    <list>
-FILES MODIFIED: <list>
+MILESTONE:       <id>
+MODE:            MAIN_MILESTONE | PR_INTEGRITY
+LOCAL HEAD:      <sha>
+GITHUB main:     <sha>   (only required for MAIN_MILESTONE; "(not consulted)" for PR_INTEGRITY)
+TESTED SHA:      <sha>
+MATCH:           YES | NO
+MATCH INVARIANT: <human-readable invariant>
+WORKTREE CLEAN:  YES | NO
+
+TEST RESULT:     <N> passed / <N> failed
+ARCHITECTURE:    <N> passed / <N> failed (FATAL)
+SECURITY:        <N> passed / <N> failed (FATAL)
+TYPECHECK:        PASS | FAIL (FATAL)
+
+FILES ADDED:     <list>
+FILES MODIFIED:  <list>
 ```
 
-9. **Independent verification**: the human reviewer may run `git ls-tree -r origin/main --name-only` and `git show origin/main:<path>` to confirm each claimed file is actually present at the claimed SHA on GitHub. The agent MUST NOT claim a file is on main unless `git show origin/main:<path>` succeeds for that path.
+### Reviewer verification rights
 
-10. **CI enforcement (when GitHub Actions is enabled)**: a workflow on `push` and `pull_request` MUST emit `BUILD_AT_SHA`, `TESTED_AT_SHA`, and `ARCHITECTURE_AT_SHA` as outputs, and fail the build if `git status --porcelain` is non-empty or if the three SHAs do not all equal `github.sha`. This makes the gate machine-enforced, not agent-reported.
+**MAIN_MILESTONE mode** — the reviewer may run:
+- `git ls-tree -r origin/main --name-only` to list every file at origin/main.
+- `git show origin/main:<path>` to retrieve the exact bytes.
+- `git rev-parse origin/main` to confirm the SHA reported here.
+
+The agent MUST NOT claim a file is on main unless `git show origin/main:<path>` succeeds for that path.
+
+**PR_INTEGRITY mode** — the reviewer may run:
+- `git rev-parse HEAD` to confirm the checked-out SHA.
+- `git show HEAD:<path>` to retrieve the exact bytes at the checked-out commit.
+- Note: `origin/main` equality is NOT required and NOT checked.
+
+### CI enforcement (when GitHub Actions is enabled)
+
+A workflow on `push: branches: [main]` runs the gate in MAIN_MILESTONE mode. A workflow on `pull_request: branches: [main]` runs the gate in PR_INTEGRITY mode. Both workflows emit `BUILD_AT_SHA`, `TESTED_AT_SHA`, and `ARCHITECTURE_AT_SHA` as outputs, and fail the build if:
+- `git status --porcelain` is non-empty (worktree dirty), OR
+- The three SHAs do not all equal `github.sha`, OR
+- The architecture subset fails, OR
+- The security subset fails, OR
+- The typecheck fails (no longer `continue-on-error: true`).
+
+### Branch protection / required status checks (S0.2.4 §9)
+
+GitHub branch protection rules and repository rulesets are NOT available on private repositories without GitHub Pro / Team / Enterprise. The `pectoraux/universal-comm-os` repository is currently private — the GitHub API returns `403` on `PUT /repos/{owner}/{repo}/branches/main/protection` and on `POST /repos/{owner}/{repo}/rulesets`.
+
+Until either:
+- (a) the repository is made public (branch protection is free for public repos), OR
+- (b) the repository is upgraded to GitHub Pro / Team / Enterprise,
+
+the branch protection layer CANNOT be machine-enforced via GitHub's native API. Two compensating controls are in place:
+
+1. **Self-enforcement via the gate script** — every push to `main` triggers the MAIN_MILESTONE gate job in CI, which fails the build if `local HEAD != origin/main HEAD`. A failed build is a clear signal to the reviewer that the gate was not satisfied. The agent MUST NOT report "complete" without an Article XVI COMMIT REPORT whose SHAs match.
+
+2. **Pre-push hook** (`scripts/install-pre-push-hook.sh`, installed locally on every developer machine) runs the PR_INTEGRITY gate before allowing a push. The hook can be bypassed with `git push --no-verify`, but doing so is recorded as an Article XVI violation.
+
+The reviewer MAY at any time:
+- `curl -sS https://api.github.com/repos/pectoraux/universal-comm-os/branches/main/protection` to verify whether branch protection is enabled. If the response is `404`, protection is OFF (the repo is still private without Pro). If `200`, protection is ON.
+- Recommend making the repository public (which enables free branch protection) before the next hardening sprint.
+
+### Mandatory rule
 
 A milestone reported COMPLETE without satisfying Article XVI is automatically INVALID — the report counts as an architecture-control defect, not a milestone completion. The reviewer MUST NOT accept such a report.
 
-This article was added in response to the S0.2.2 governance failure: the agent reported "All 259 tests pass / S0.2.2 is complete" while the implementation existed only in the local working tree and had not been pushed to GitHub `main`. The reviewer's independent check of the authoritative branch proved the claimed `IdentityLinkStateMachine.ts` returned 404 and the claimed `VerificationState` vocabulary was still the old 3-state `UNVERIFIED | VERIFIED | REVOKED`. The fix is not merely pushing the work — it is preventing the asymmetry from recurring.
+### History
+
+This article was added in S0.2.3 in response to the S0.2.2 governance failure: the agent reported "All 259 tests pass / S0.2.2 is complete" while the implementation existed only in the local working tree and had not been pushed to GitHub `main`. The reviewer's independent check of the authoritative branch proved the claimed `IdentityLinkStateMachine.ts` returned 404 and the claimed `VerificationState` vocabulary was still the old 3-state `UNVERIFIED | VERIFIED | REVOKED`. The fix is not merely pushing the work — it is preventing the asymmetry from recurring.
+
+S0.2.4 extended the gate with two modes (MAIN_MILESTONE and PR_INTEGRITY), made architecture tests FATAL (was `|| true`), made security tests a FATAL dedicated subset, made typecheck FATAL (was `continue-on-error: true`), and added the branch-protection self-enforcement layer (the GitHub API returns 403 on the private repo without GitHub Pro — compensated by pre-push hooks + CI gating).

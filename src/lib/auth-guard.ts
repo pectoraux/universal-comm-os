@@ -20,8 +20,12 @@ import 'server-only';
 import { getServerSession } from 'next-auth';
 import { authOptions } from '@/lib/auth';
 import type { Session } from 'next-auth';
+// S0.2.4 — local import so we can `instanceof AuthzError` in handleAuthError.
+// The re-export below makes AuthzError available to OTHER modules, but local
+// use in this file needs its own import.
+import { AuthzError } from '@/lib/authorization';
 
-// S0.1/S0.2/S0.2.1: Re-export authorization utilities.
+// S0.1/S0.2/S0.2.1/S0.2.2/S0.2.4: Re-export authorization utilities.
 export {
   AuthzError, safeError, logAuditEvent,
   authorizeNode, authorizeBundleAtNode, authorizeConversationAtNode,
@@ -30,7 +34,7 @@ export {
   isChannelVerified, revokeChannelLink, generateChallengeCode, hashChallengeCode,
   toAuthzRole,
 } from '@/lib/authorization';
-export type { ResourceAuthContext, ResourceVisibility, AuthzRole } from '@/lib/authorization';
+export type { ResourceVisibility, AuthzRole } from '@/lib/authorization';
 
 export interface AuthContext {
   session: Session;
@@ -107,6 +111,21 @@ export class AuthError extends Error {
  * Helper: safely execute a server action with auth guard.
  * Returns the result or a structured error.
  */
+// S0.2.4 — `withAuth` and `withRole` now catch BOTH `AuthError` (authentication
+// failures) AND `AuthzError` (authorization failures thrown from inside the
+// action body, e.g. the dispatchBundleAction's "channel not VERIFIED" early-
+// throw). Previously `AuthzError` fell through to the INTERNAL branch, losing
+// the FORBIDDEN code.
+async function handleAuthError(e: unknown): Promise<{ ok: false; error: string; code: string; }> {
+  if (e instanceof AuthError) {
+    return { ok: false, error: e.message, code: e.code };
+  }
+  if (e instanceof AuthzError) {
+    return { ok: false, error: e.message, code: e.code };
+  }
+  return { ok: false, error: String(e), code: 'INTERNAL' };
+}
+
 export async function withAuth<T>(
   fn: (ctx: AuthContext) => Promise<T>,
 ): Promise<{ ok: true; data: T } | { ok: false; error: string; code: string }> {
@@ -115,10 +134,7 @@ export async function withAuth<T>(
     const data = await fn(ctx);
     return { ok: true, data };
   } catch (e) {
-    if (e instanceof AuthError) {
-      return { ok: false, error: e.message, code: e.code };
-    }
-    return { ok: false, error: String(e), code: 'INTERNAL' };
+    return handleAuthError(e);
   }
 }
 
@@ -134,9 +150,6 @@ export async function withRole<T>(
     const data = await fn(ctx);
     return { ok: true, data };
   } catch (e) {
-    if (e instanceof AuthError) {
-      return { ok: false, error: e.message, code: e.code };
-    }
-    return { ok: false, error: String(e), code: 'INTERNAL' };
+    return handleAuthError(e);
   }
 }
