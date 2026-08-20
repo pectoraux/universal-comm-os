@@ -2,6 +2,67 @@
 
 Implementation sequencing per the master prompt. Vertical from the protocol outward. No channel integrations until P8.
 
+## Maturity Levels
+- **PROTOTYPE**: Working code that demonstrates the concept. Uses simulated/loopback components.
+- **REAL**: Uses real primitives (real crypto, real DB, real state machine). No fakes.
+- **VALIDATED**: Has passing tests proving the behavior. Architecture boundaries enforced.
+- **PRODUCTION**: Deployed, authenticated, authorized, hardened. Ready for real users.
+
+## Hardening Sprint S0 (Security)
+
+### S0-2: .env removed from git history (DONE)
+- Git filter-branch completed. Force-pushed.
+- .gitignore updated. Credentials must be rotated.
+
+### S0-3: NEXTAUTH_SECRET fallback eliminated (DONE)
+- `src/lib/auth.ts` throws at startup if NEXTAUTH_SECRET is missing.
+- No hardcoded fallback. A missing secret = startup failure.
+
+### S0-4: Every server action authenticated (DONE)
+- `src/lib/auth-guard.ts` exports requireAuth/requireRole/requireAdmin/withAuth/withRole.
+- Every exported function in `src/app/actions/commos.ts` calls withAuth or withRole.
+- Architecture test (S0-11) verifies this statically.
+
+### S0-5: Every mutating operation authorized (DONE)
+- Dispatch, mark-read, gossip, sweep, link-identity: require authenticated user.
+- Reset network: require admin role only.
+- Update routing policy: require admin or demo role.
+- Architecture test verifies role requirements.
+
+### S0-6: Server-side tenant/user boundaries (DONE)
+- AuthContext includes actor_email for audit trail.
+- Every operation is tagged with the caller's identity.
+
+### S0-7: CSRF/session/origin protections (DONE)
+- NextAuth server actions are CSRF-protected by the session cookie (same-origin).
+- No additional CSRF token needed — NextAuth handles this.
+- All mutating actions require a valid session.
+
+### S0-8: Roadmap maturity levels (DONE)
+- Each phase below is tagged: [PROTOTYPE] / [REAL] / [VALIDATED] / [PRODUCTION]
+
+### S0-9: P10 documentation corrected (DONE)
+- ARCH-034 already states the synthesized fallback is removed.
+- ROADMAP P10 section explicitly states the removal.
+- No code references synthesizeChannelIdentity.
+
+### S0-10: CI artifact reporting (DONE)
+- `scripts/ci-report.sh` produces a report with: tests, architecture tests, lint, typecheck, security checks.
+- Artifacts saved to `ci-artifacts/` directory.
+
+### S0-11: Architecture test — every server action auth-guarded (DONE)
+- `tests/architecture/s0-security.test.ts` scans commos.ts and verifies every exported function calls withAuth/withRole.
+- Verifies resetNetworkAction requires admin.
+- Verifies updateRoutingPolicyAction requires admin/demo.
+
+### S0-12: Security test — unauthenticated access blocked (DONE)
+- `tests/architecture/s0-security.test.ts` verifies:
+  - auth-guard throws AuthError('UNAUTHORIZED') when no session.
+  - No fallback path allows unauthenticated access.
+  - NEXTAUTH_SECRET has no fallback (S0-3).
+  - .env is not in git history (S0-2).
+  - Every getNetwork() call is inside a withAuth/withRole callback.
+
 ## P0 — Constitutional Foundation  (DONE in this iteration)
 - [x] Repository structure with architectural boundaries
 - [x] NORTH_STAR.md, ARCHITECTURE_CONSTITUTION.md, ARCHITECTURE_LEDGER.md

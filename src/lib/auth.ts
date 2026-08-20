@@ -2,6 +2,18 @@ import type { NextAuthOptions } from 'next-auth';
 import CredentialsProvider from 'next-auth/providers/credentials';
 import { db } from '@/lib/db';
 
+// S0-3: NEXTAUTH_SECRET must be set in the environment. No fallback.
+// If it's missing, the app throws at startup — better to fail than to use
+// a predictable secret that allows JWT forgery.
+const NEXTAUTH_SECRET = process.env.NEXTAUTH_SECRET;
+if (!NEXTAUTH_SECRET) {
+  throw new Error(
+    'FATAL: NEXTAUTH_SECRET environment variable is not set. ' +
+    'Generate one with: openssl rand -hex 32. ' +
+    'No fallback is provided — a missing secret is a startup failure.'
+  );
+}
+
 export const authOptions: NextAuthOptions = {
   providers: [
     CredentialsProvider({
@@ -58,5 +70,5 @@ export const authOptions: NextAuthOptions = {
       return session;
     },
   },
-  secret: process.env.NEXTAUTH_SECRET || 'dev-secret-change-in-production',
+  secret: NEXTAUTH_SECRET,
 };
