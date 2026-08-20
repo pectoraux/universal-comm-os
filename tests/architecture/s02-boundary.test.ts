@@ -154,8 +154,8 @@ describe('S0.2-5/6: Channel verification challenge system', () => {
     expect(source).toContain('export async function verifyChannelChallenge');
   });
 
-  it('isVerifiedLink function exists', () => {
-    expect(source).toContain('export function isVerifiedLink');
+  it('isChannelVerified function exists (S0.2.1: renamed from isVerifiedLink)', () => {
+    expect(source).toContain('export async function isChannelVerified');
   });
 
   it('linkIdentityToChannelAction creates a challenge (ASSERTED state)', () => {
@@ -174,9 +174,9 @@ describe('S0.2-5/6: Channel verification challenge system', () => {
 describe('S0.2-7: ASSERTED identities not used for production delivery', () => {
   const source = readFileSync(ACTIONS_FILE, 'utf-8');
 
-  it('dispatchBundleAction checks isVerifiedLink for channel recipients', () => {
+  it('dispatchBundleAction checks isChannelVerified for channel recipients', () => {
     const fnBody = extractFn(source, 'dispatchBundleAction');
-    expect(fnBody).toContain('isVerifiedLink');
+    expect(fnBody).toContain('isChannelVerified');
   });
 });
 
@@ -187,8 +187,8 @@ describe('S0.2-8: validateOrigin removed', () => {
     expect(source).not.toContain('export function validateOrigin');
   });
 
-  it('comment explains removal', () => {
-    expect(source).toContain('S0.2-8: validateOrigin() has been REMOVED');
+  it('validateOrigin function does NOT exist (S0.2-8: removed, S0.2.1: comment also removed)', () => {
+    expect(source).not.toContain('export function validateOrigin');
   });
 });
 

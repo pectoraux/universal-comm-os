@@ -21,12 +21,13 @@ import { getServerSession } from 'next-auth';
 import { authOptions } from '@/lib/auth';
 import type { Session } from 'next-auth';
 
-// S0.1/S0.2: Re-export authorization utilities.
+// S0.1/S0.2/S0.2.1: Re-export authorization utilities.
 export {
   AuthzError, safeError, logAuditEvent,
   authorizeNode, authorizeBundleAtNode, authorizeConversationAtNode,
   authorizeNetworkOperation, authorizeByVisibility,
-  createChannelChallenge, verifyChannelChallenge, isVerifiedLink,
+  createChannelChallenge, verifyChannelChallenge, getChannelLinkState,
+  isChannelVerified, revokeChannelLink, generateChallengeCode, hashChallengeCode,
   toAuthzRole,
 } from '@/lib/authorization';
 export type { ResourceAuthContext, ResourceVisibility, AuthzRole } from '@/lib/authorization';

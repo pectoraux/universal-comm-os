@@ -99,11 +99,15 @@ model ChannelVerificationChallenge {
   node_id         String
   channel         String   // EMAIL, SMS, WHATSAPP, etc.
   channel_id      String   // e.g. bob@example.com
-  challenge_code  String   // OTP or verification code
-  status          String   @default("pending") // pending | verified | expired
+  // S0.2.1-2: Hash of the challenge code (SHA-256). Never store plaintext.
+  challenge_hash  String
+  status          String   @default("pending") // pending | verified | expired | revoked
+  // S0.2.1-3: The link's verification state in the IdentityGraph.
+  link_state      String   @default("ASSERTED") // ASSERTED | VERIFIED | EXPIRED | REVOKED
   created_at      DateTime @default(now())
   expires_at      DateTime
   verified_at     DateTime?
+  organization_id String?
 
   @@unique([node_id, channel, channel_id])
   @@map("channel_verification_challenges")

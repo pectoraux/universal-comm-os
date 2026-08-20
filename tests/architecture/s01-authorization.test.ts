@@ -75,9 +75,7 @@ describe('S0.1-3: authorization.ts exists and exports required functions', () =>
 
   it('S0.2-8: validateOrigin has been REMOVED (rely on framework)', () => {
     const source = readFileSync(AUTHZ_FILE, 'utf-8');
-    // S0.2-8: validateOrigin was removed — we rely on NextAuth's same-origin protection.
     expect(source).not.toContain('export function validateOrigin');
-    expect(source).toContain('S0.2-8: validateOrigin() has been REMOVED');
   });
 });
 

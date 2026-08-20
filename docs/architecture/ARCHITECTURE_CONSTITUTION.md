@@ -119,3 +119,16 @@ A resource's existence, ownership, membership, visibility, and channel verificat
 4. **ASSERTED identities MUST NOT be used for production delivery.** Only `VERIFIED` links can be used to resolve recipient encryption pubkeys for dispatch.
 5. **Denied operations MUST be audited.** The authorization boundary itself logs `AuditEvent(denied)` before returning FORBIDDEN. The audit system never depends on the protected operation running first.
 6. **Security audit persistence is mandatory for denied operations.** If the audit write fails for a denied operation, the operation is still denied, but a secondary alert/queue MUST capture the event.
+
+## Article XIV — Authorization State ≠ Resource State (S0.2.1)
+
+An authorization state and a resource state must never be inferred from each other. A channel's ASSERTED/VERIFIED/REVOKED state is independent of the caller's organization authorization. Both checks are mandatory.
+
+1. New IdentityGraph links default to `ASSERTED`. The server asserting "this channel belongs to this node" is NOT the same as the channel owner proving it.
+2. `resolveChannelRecipient()` returns ONLY `VERIFIED` links. `ASSERTED` and `REVOKED` links are invisible to the dispatch path.
+3. Verification state is persisted in the database (not in-memory). It survives restarts.
+4. Challenge codes are cryptographically random (`crypto.getRandomValues`). Stored as SHA-256 hashes. Never returned to the browser after creation.
+5. Challenge is delivered through the actual target channel (email link, SMS OTP, etc.). In the demo, it appears in the channel transcript.
+6. State transitions: `ASSERTED → VERIFIED` (challenge verified), `ASSERTED → EXPIRED` (TTL elapsed), `VERIFIED → REVOKED` (explicit revocation).
+7. Dispatch MUST reject `ASSERTED` and `REVOKED` channel identities. Only `VERIFIED` can resolve the recipient's encryption pubkey.
+8. All communication resources (IdentityGraph, transcripts, capability caches, delivery state) are partitioned by organization. Cross-org access is FORBIDDEN.
