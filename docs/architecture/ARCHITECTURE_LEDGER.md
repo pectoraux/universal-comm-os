@@ -24,6 +24,10 @@ Numbered architectural decisions. Append-only. Each entry: ID, decision, rationa
 | ARCH-018 | Capability advertisement is explicit; a node is NOT a gateway merely because it has Internet. | ACTIVE  |
 | ARCH-019 | Self-reported contribution is never trusted. Contribution accounting requires verifiable evidence (deferred to P13). | ACTIVE  |
 | ARCH-020 | No premature complexity: no token economy, no advanced AI routing, no speculative blockchain, no unnecessary microservices before foundational protocol semantics are correct. | ACTIVE  |
+| ARCH-021 | BundleStore is an interface; both in-memory (tests) and Prisma-backed (production) implementations conform. Switching is a deployment choice, not an architecture change. | ACTIVE  |
+| ARCH-022 | Per-node delivery state machine lives in-memory (live source of truth) AND is mirrored to the DB for forensics/restart. The in-memory tracker is authoritative for ARCH-012 conformance. | ACTIVE  |
+| ARCH-023 | RELAY_FORWARD proofs are signed by relays using their Ed25519 signing key and appended to the bundle's `proofs[]`. The recipient verifies the entire chain. Relays do NOT need the sender's signing key. | ACTIVE  |
+| ARCH-024 | Replication fan-out sends the same bundle_id to N independent peers in parallel. Deduplication at the recipient (canonical bundle_id) makes the first-arrival-wins semantics automatic. | ACTIVE  |
 
 ---
 
@@ -89,3 +93,19 @@ Numbered architectural decisions. Append-only. Each entry: ID, decision, rationa
 ### ARCH-020 — No premature complexity
 - **Rationale**: Premature token economics, AI routing, dozens of adapters, and speculative distributed databases corrupt the foundational protocol before it is correct.
 - **Implications**: Out-of-scope items remain unimplemented (not faked) until their roadmap phase.
+
+### ARCH-021 — BundleStore is an interface (P3.1)
+- **Rationale**: Tests need an in-memory store (no I/O, fast); production needs persistence (Prisma-backed). Both must conform to the same protocol so that the NodeRuntime is unaware of the storage choice.
+- **Implications**: `BundleStore` interface lives in `server/NodeRuntime.ts`. `createInMemoryBundleStore()` for tests; `createPrismaBundleStore()` for production. Switch is per-node at construction time.
+
+### ARCH-022 — Per-node delivery tracker dual-locates (P3.2)
+- **Rationale**: The in-memory tracker is the LIVE source of truth for ARCH-012 (state machine legality, transitions, errors). The DB mirror survives restarts and supports forensic queries (TTL sweeper writes EXPIRED transitions, ops can replay history).
+- **Implications**: `createDeliveryTracker()` (in-memory) is the canonical tracker per NodeRuntime. The TTL sweeper writes EXPIRED transitions to BOTH the DB (`StoredBundle.state` + `DeliveryEvent`) AND the in-memory tracker of the relevant node (via the runtime's `delivery.transition()`).
+
+### ARCH-023 — RELAY_FORWARD proofs (P3.6)
+- **Rationale**: Recipients must be able to verify which relays touched a bundle. Relays sign over (bundle_id, relay_node_id, from_node_id, to_node_id, transport, ts) using their own Ed25519 key. The sender's signing key is never shared with relays.
+- **Implications**: `NodeRuntime` accepts an optional `signing_secret_key` in its deps. A relay without a signing key skips the proof-append step (the bundle still forwards, but without the proof — observability loss, not a security loss).
+
+### ARCH-024 — Replication fan-out semantics (P3.4)
+- **Rationale**: In a DTN, the same bundle may be carried by N independent relays simultaneously. Whichever path arrives first wins; the recipient's dedup logic (canonical bundle_id) makes the second arrival a no-op.
+- **Implications**: `dispatch({replicate: true})` sends the same bundle_id to up to `policy.replication_factor` peers in parallel. The router's `pickReplicas()` returns the primary hop + other reachable peers, capped at the factor. Cost vs. reliability trade-off is policy, not architecture.

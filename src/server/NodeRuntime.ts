@@ -8,6 +8,16 @@
  * It MAY depend on core/*, transport/*, adapters/*, gateway/*.
  *
  * It is NOT the protocol — it is a participant in the protocol.
+ *
+ * ROADMAP P3 additions:
+ *   - Multi-hop forwarding: a relay that receives a bundle NOT addressed to it
+ *     runs its own router and forwards to the next hop (P3.5).
+ *   - Replication fan-out: dispatch() may send the bundle to N independent
+ *     relays in parallel; first OK wins; others are no-ops (P3.4).
+ *   - RELAY_FORWARD proof: when a relay forwards a bundle, it signs a
+ *     RELAY_FORWARD proof and appends it to the bundle's proofs[] (P3.6).
+ *   - Deduplication is the responsibility of the BundleStore (P3.3); the
+ *     runtime additionally consults the store's `has()` method.
  */
 
 import type { CommunicationBundle } from '@/core/bundle/types';
@@ -17,35 +27,41 @@ import type { Transport } from '@/core/transport/Transport';
 import type { TransportEventSink } from '@/core/transport/TransportEvent';
 import type { DeliveryTracker } from '@/core/delivery/DeliveryTracker';
 import type { RoutingPolicy } from '@/core/policy/types';
-import type { RoutePlan } from '@/core/routing/types';
+import type { RoutePlan, RouteHop } from '@/core/routing/types';
+import type { Proof } from '@/core/bundle/types';
 import { createRouter } from '@/core/routing/Router';
 import { createDeliveryTracker } from '@/core/delivery/DeliveryTracker';
 import { defaultPolicy } from '@/core/policy/RoutingPolicy';
-import { isExpired } from '@/core/bundle/CommunicationBundle';
-import { ProtocolError } from '@/core/errors';
+import { isExpired, appendProof, canonicalEnvelope } from '@/core/bundle/CommunicationBundle';
+import { signProof } from '@/core/trust/Proof';
+import { hashBytes } from '@/core/trust/CryptoEnvelope';
+import { toRef } from '@/core/identity/UniversalIdentity';
 
 export interface NodeRuntimeDeps {
   identity: UniversalIdentity;
   capabilities: NodeCapabilities;
   transports: Transport[];
   routing_policy?: RoutingPolicy;
-  /** Optional: local store-and-forward queue. */
+  /** Optional: local store-and-forward queue (in-memory OR Prisma-backed). */
   bundleStore?: BundleStore;
+  /** Optional: the node's signing secret key (needed to sign RELAY_FORWARD proofs). */
+  signing_secret_key?: Uint8Array;
   /** Optional: gateway-facing adapter registry. */
   gatewayRegistry?: Map<string, { node_id: string; channel: string }>;
 }
 
 /**
- * Minimal in-process bundle store interface for store-and-forward semantics.
+ * BundleStore interface — both in-memory (tests) and Prisma (production)
+ * implementations conform. May be sync or async.
  */
 export interface BundleStore {
-  push(bundle: CommunicationBundle, nextHop: string, ts?: number): void;
-  pop(): { bundle: CommunicationBundle; nextHop: string; queued_at: number } | undefined;
-  size(): number;
+  push(bundle: CommunicationBundle, nextHop: string, ts?: number): void | Promise<void>;
+  pop(): { bundle: CommunicationBundle; nextHop: string; queued_at: number } | undefined | Promise<{ bundle: CommunicationBundle; nextHop: string; queued_at: number } | undefined>;
+  size(): number | Promise<number>;
   /** Iterate without removing. */
-  peek(): Array<{ bundle: CommunicationBundle; nextHop: string; queued_at: number }>;
-  remove(bundle_id: string): boolean;
-  has(bundle_id: string): boolean;
+  peek(): Array<{ bundle: CommunicationBundle; nextHop: string; queued_at: number }> | Promise<Array<{ bundle: CommunicationBundle; nextHop: string; queued_at: number }>>;
+  remove(bundle_id: string): boolean | Promise<boolean>;
+  has(bundle_id: string): boolean | Promise<boolean>;
 }
 
 export function createInMemoryBundleStore(): BundleStore {
@@ -92,7 +108,7 @@ export interface NodeRuntime {
   receiveBundle(bundle: CommunicationBundle, from_node_id: string): Promise<void>;
 
   /** Snapshot of queued bundles. */
-  queuedBundles(): Array<{ bundle: CommunicationBundle; nextHop: string; queued_at: number }>;
+  queuedBundles(): Promise<Array<{ bundle: CommunicationBundle; nextHop: string; queued_at: number }>>;
 
   /** Get all peers we can see, by aggregating transports. */
   listReachablePeers(): Promise<string[]>;
@@ -106,11 +122,15 @@ export interface DispatchInput {
     channel_id?: string;
     identity_id?: string;
   };
+  /** If true, send to N independent relays per replication_factor (P3.4). */
+  replicate?: boolean;
 }
 
 export interface DispatchResult {
   status: 'DISPATCHED' | 'QUEUED' | 'NO_ROUTE' | 'BUNDLE_EXPIRED' | 'ERROR';
   plan?: RoutePlan;
+  /** Number of relays the bundle was replicated to (P3.4). 1 = no replication. */
+  replicas_sent?: number;
   error?: string;
 }
 
@@ -119,75 +139,152 @@ export function createNodeRuntime(deps: NodeRuntimeDeps): NodeRuntime {
   const policy = deps.routing_policy ?? defaultPolicy;
   const route = createRouter(policy);
 
-  // For now, we don't have a structured PeerCapabilities cache; the runtime
-  // exposes them per the transports that are attached. For P2 loopback, each
-  // transport's peer set is the set of reachable peers.
-  const knownPeerCache = new Map<string, { transport: TransportCapabilityTypeStr; node_id: string }>();
-
-  const events: TransportEventSink = {
-    emit() {
-      /* no-op default; replaced below */
-    },
-    subscribe() {
-      return () => {};
-    },
-  };
-
   for (const t of deps.transports) {
     t.onReceive((bundle, from) => {
       void receiveBundle(bundle, from);
     });
   }
 
+  // ──────────────────────────────────────────────────────────────────────
+  // receiveBundle: entry point when a bundle arrives at this node via a
+  // transport. The bundle's payload is opaque to us (we cannot decrypt it).
+  // We must decide: am I the recipient? If yes -> DELIVERED. If no -> forward.
+  // ──────────────────────────────────────────────────────────────────────
   async function receiveBundle(bundle: CommunicationBundle, from_node_id: string): Promise<void> {
-    // Dedup at the receiver too (THREAT_MODEL: replay + duplication).
-    if (deps.bundleStore?.has(bundle.bundle_id)) return;
+    // Dedup at the receiver (THREAT_MODEL: replay + duplication).
+    if (await deps.bundleStore?.has(bundle.bundle_id)) return;
     if (isExpired(bundle)) {
-      tracker.transition(bundle.bundle_id, 'EXPIRED', { node: deps.capabilities.node_id, note: 'arrived expired' });
+      if (!tracker.get(bundle.bundle_id)) tracker.init(bundle.bundle_id);
+      try {
+        tracker.transition(bundle.bundle_id, 'EXPIRED', {
+          node: deps.capabilities.node_id,
+          note: 'arrived expired',
+        });
+      } catch {
+        // If state machine rejects (e.g. already terminal), ignore.
+      }
       return;
     }
 
-    // If this node is the destination identity, mark DELIVERED.
     const isRecipient =
-      (bundle.recipient.kind === 'IDENTITY' && bundle.recipient.ref.id === deps.identity.id) ||
-      (bundle.recipient.kind === 'CONVERSATION' && bundle.recipient.conversation_id.startsWith('conv:')) ||
-      bundle.recipient.kind === 'CHANNEL';
+      bundle.recipient.kind === 'IDENTITY' && bundle.recipient.ref.id === deps.identity.id;
 
-    if (!tracker.get(bundle.bundle_id)) {
-      tracker.init(bundle.bundle_id);
-    }
+    if (!tracker.get(bundle.bundle_id)) tracker.init(bundle.bundle_id);
+
     try {
-      tracker.transition(bundle.bundle_id, 'ACCEPTED', { node: deps.capabilities.node_id, transport: 'loopback' });
-      tracker.transition(bundle.bundle_id, 'RELAYED', { node: from_node_id, note: `received from ${from_node_id}` });
+      tracker.transition(bundle.bundle_id, 'ACCEPTED', {
+        node: deps.capabilities.node_id,
+        transport: 'loopback',
+        note: `received from ${from_node_id}`,
+      });
+
       if (isRecipient) {
+        // This node IS the destination identity.
+        tracker.transition(bundle.bundle_id, 'RELAYED', { node: from_node_id });
         tracker.transition(bundle.bundle_id, 'DELIVERED', { node: deps.capabilities.node_id });
-        // Recipient can mark READ later via explicit API.
-      } else if (deps.bundleStore) {
-        // We're a relay; queue for forwarding per DTN semantics.
-        deps.bundleStore.push(bundle, 'next-hop');
+        return;
+      }
+
+      // This node is a RELAY. Per DTN semantics, either forward immediately
+      // or store for later. We try to forward immediately if we have a route.
+      tracker.transition(bundle.bundle_id, 'RELAYED', {
+        node: from_node_id,
+        note: 'relay received',
+      });
+
+      const forwarded = await tryForward(bundle, from_node_id);
+      if (!forwarded && deps.bundleStore) {
+        // No immediate route; store-and-forward per DTN semantics.
+        await deps.bundleStore.push(bundle, 'pending-route');
       }
     } catch (err) {
-      // Illegal transition means state machine violation; log it.
+      // Illegal transition means state machine violation; log it silently
+      // (in a real system we'd emit to observability).
       void err;
     }
   }
 
+  /**
+   * tryForward: the relay runs its own router to find a next hop and forwards
+   * the bundle. Signs a RELAY_FORWARD proof and appends it (P3.6).
+   * Returns true if the bundle was forwarded to at least one peer.
+   */
+  async function tryForward(
+    bundle: CommunicationBundle,
+    from_node_id: string,
+  ): Promise<boolean> {
+    const peers = await listReachablePeers();
+    const peerCaps = peers
+      .filter((n) => n !== from_node_id) // don't bounce back to sender
+      .map((node_id) => ({
+        node_id,
+        transport: deps.transports.filter((t) => t.isAvailable()).map((t) => t.transport_type),
+        relay: deps.capabilities.relay.size > 0 ? (['STORE', 'FORWARD'] as Array<'STORE' | 'FORWARD'>) : ([] as Array<'STORE' | 'FORWARD'>),
+        gateway: Array.from(deps.capabilities.gateway),
+        verification: deps.capabilities.verification,
+      }));
+
+    const decision = route(
+      {
+        intent: bundle.intent,
+        sender_node_id: deps.capabilities.node_id,
+        known_peers: peerCaps,
+        destination: bundle.recipient.kind === 'IDENTITY' ? { identity_id: bundle.recipient.ref.id } : undefined,
+      },
+      policy,
+    );
+
+    if (decision.status !== 'ROUTE_FOUND' || !decision.plan || decision.plan.hops.length === 0) {
+      return false;
+    }
+
+    const firstHop = decision.plan.hops[0];
+    if (!firstHop.to_node_id) return false;
+    // Pick the transport that (a) matches the hop's transport type AND (b) actually
+    // has the target peer in its peer set. A relay may have multiple transports
+    // of the same type on different buses; the wrong one would fail the send.
+    const transport = pickTransportForHop(deps.transports, firstHop);
+    if (!transport || !transport.isAvailable()) return false;
+
+    // Sign a RELAY_FORWARD proof and append it to the bundle before forwarding (P3.6).
+    let bundleToForward = bundle;
+    if (deps.signing_secret_key) {
+      const relayProof = signProof(
+        'RELAY_FORWARD',
+        {
+          bundle_id: bundle.bundle_id,
+          relay_node_id: deps.capabilities.node_id,
+          from_node_id,
+          to_node_id: firstHop.to_node_id,
+          transport: firstHop.transport ?? 'unknown',
+          ts: Date.now(),
+        },
+        toRef(deps.identity),
+        deps.signing_secret_key,
+      );
+      bundleToForward = appendProof(bundle, relayProof);
+    }
+
+    const result = await transport.send(bundleToForward, firstHop.to_node_id);
+    return result.kind === 'OK';
+  }
+
+  // ──────────────────────────────────────────────────────────────────────
+  // dispatch: compose + route + send a brand new bundle from this node.
+  // ──────────────────────────────────────────────────────────────────────
   async function dispatch(input: DispatchInput): Promise<DispatchResult> {
     if (isExpired(input.bundle)) {
       return { status: 'BUNDLE_EXPIRED' };
     }
     tracker.init(input.bundle.bundle_id);
 
-    // Build a RoutingContext from known peers.
     const peers = await listReachablePeers();
     const peerCaps = peers.map((node_id) => ({
       node_id,
-      transport: deps.transports
-        .filter((t) => t.isAvailable())
-        .map((t) => t.transport_type),
+      transport: deps.transports.filter((t) => t.isAvailable()).map((t) => t.transport_type),
       relay: deps.capabilities.relay.size > 0 ? (['STORE', 'FORWARD'] as Array<'STORE' | 'FORWARD'>) : ([] as Array<'STORE' | 'FORWARD'>),
       gateway: Array.from(deps.capabilities.gateway),
-      verification: 'UNVERIFIED' as const,
+      verification: deps.capabilities.verification,
     }));
 
     const decision = route(
@@ -201,57 +298,65 @@ export function createNodeRuntime(deps: NodeRuntimeDeps): NodeRuntime {
     );
 
     if (decision.status !== 'ROUTE_FOUND' || !decision.plan) {
-      tracker.transition(input.bundle.bundle_id, 'NO_ROUTE', { note: decision.reason });
+      try { tracker.transition(input.bundle.bundle_id, 'NO_ROUTE', { note: decision.reason }); } catch {}
       return { status: 'NO_ROUTE', error: decision.reason };
     }
 
-    // Mutate plan to carry bundle_id (router returns blank id).
     const plan: RoutePlan = { ...decision.plan, bundle_id: input.bundle.bundle_id };
 
-    tracker.transition(input.bundle.bundle_id, 'ACCEPTED', { node: deps.capabilities.node_id });
+    try { tracker.transition(input.bundle.bundle_id, 'ACCEPTED', { node: deps.capabilities.node_id }); } catch {}
 
-    // Execute the first hop only. Multi-hop is the DTN store's job at the next peer.
-    const firstHop = plan.hops[0];
-    if (!firstHop || !firstHop.to_node_id) {
-      tracker.transition(input.bundle.bundle_id, 'NO_ROUTE', { note: 'plan missing first hop' });
+    // ── P3.4 Replication fan-out ──
+    // If input.replicate === true AND policy.replication_factor > 1,
+    // send to up to N independent relays in parallel. First OK wins; others
+    // are silently discarded (their delivery still succeeds via the canonical
+    // bundle_id deduplication at the recipient).
+    const targetHops: RouteHop[] = input.replicate && policy.replication_factor > 1
+      ? pickReplicas(decision.plan.hops, peers, policy.replication_factor)
+      : decision.plan.hops;
+
+    if (targetHops.length === 0 || !targetHops[0].to_node_id) {
+      try { tracker.transition(input.bundle.bundle_id, 'NO_ROUTE', { note: 'plan missing first hop' }); } catch {}
       return { status: 'NO_ROUTE', error: 'plan missing first hop' };
     }
 
-    const transport = deps.transports.find((t) => t.transport_type === firstHop.transport);
-    if (!transport) {
-      tracker.transition(input.bundle.bundle_id, 'TRANSPORT_UNAVAILABLE' as any, {
-        note: `no transport for ${firstHop.transport}`,
-      });
-      // The state machine doesn't have TRANSPORT_UNAVAILABLE; use CHANNEL_UNAVAILABLE for now.
-      return { status: 'ERROR', error: `no transport for ${firstHop.transport}` };
+    try { tracker.transition(input.bundle.bundle_id, 'QUEUED', { transport: 'multi' }); } catch {}
+
+    const sendResults = await Promise.all(
+      targetHops.map(async (hop) => {
+        const transport = pickTransportForHop(deps.transports, hop);
+        if (!transport || !transport.isAvailable()) {
+          return { ok: false, hop, reason: 'transport unavailable' };
+        }
+        const r = await transport.send(input.bundle, hop.to_node_id!);
+        return { ok: r.kind === 'OK', hop, reason: r.kind === 'OK' ? undefined : r.reason };
+      }),
+    );
+
+    const okResults = sendResults.filter((r) => r.ok);
+    if (okResults.length > 0) {
+      try {
+        tracker.transition(input.bundle.bundle_id, 'RELAYED', {
+          transport: 'multi',
+          node: okResults[0].hop.to_node_id,
+          note: `replicated to ${okResults.length}/${targetHops.length} peer(s)`,
+        });
+      } catch {}
+      return { status: 'DISPATCHED', plan, replicas_sent: okResults.length };
     }
 
-    tracker.transition(input.bundle.bundle_id, 'QUEUED', { transport: transport.transport_id });
-    const result = await transport.send(input.bundle, firstHop.to_node_id);
-    if (result.kind === 'OK') {
-      tracker.transition(input.bundle.bundle_id, 'RELAYED', {
-        transport: transport.transport_id,
-        node: firstHop.to_node_id,
-      });
-      return { status: 'DISPATCHED', plan };
-    }
-
-    // If first-hop send failed, attempt to queue for later (DTN semantics).
+    // All sends failed -> queue for later (DTN semantics).
     if (deps.bundleStore) {
-      deps.bundleStore.push(input.bundle, firstHop.to_node_id);
-      return { status: 'QUEUED', plan };
+      await deps.bundleStore.push(input.bundle, targetHops[0].to_node_id!);
+      return { status: 'QUEUED', plan, replicas_sent: 0 };
     }
-    return { status: 'ERROR', error: result.reason ?? 'send failed' };
+    return { status: 'ERROR', error: sendResults[0]?.reason ?? 'send failed' };
   }
 
   async function listReachablePeers(): Promise<string[]> {
-    // For P2 loopback: ask the bus via each transport. We approximate by
-    // reading the transport's peer set if it exposes one.
     const peers = new Set<string>();
     for (const t of deps.transports) {
       if (!t.isAvailable()) continue;
-      // LoopbackTransport exposes `peers` via cast; for the protocol-level
-      // abstraction, we'd extend the Transport interface with peer discovery.
       const anyT = t as unknown as { peers?: Set<string> };
       if (anyT.peers) for (const p of anyT.peers) peers.add(p);
     }
@@ -263,25 +368,65 @@ export function createNodeRuntime(deps: NodeRuntimeDeps): NodeRuntime {
     identity: deps.identity,
     capabilities: deps.capabilities,
     delivery: tracker,
-    events,
+    events: { emit() {}, subscribe() { return () => {}; } },
     dispatch,
     receiveBundle,
-    queuedBundles() {
-      return deps.bundleStore?.peek() ?? [];
+    async queuedBundles() {
+      if (!deps.bundleStore) return [];
+      const peek = await deps.bundleStore.peek();
+      return peek;
     },
     listReachablePeers,
   };
 }
 
-// Local type alias to avoid importing types twice.
-type TransportCapabilityTypeStr =
-  | 'INTERNET'
-  | 'WIFI'
-  | 'BLE'
-  | 'BLUETOOTH'
-  | 'LAN'
-  | 'WIFI_AWARE';
+/**
+ * Pick N independent first-hops for replication. Currently uses the single
+ * route plan's first hop + falls back to any other reachable peers that
+ * support a transport. A more sophisticated version would consult a per-peer
+ * reliability score (P9 territory).
+ */
+function pickReplicas(
+  planHops: RouteHop[],
+  allPeers: string[],
+  replicationFactor: number,
+): RouteHop[] {
+  if (planHops.length === 0) return [];
+  const primary = planHops[0];
+  if (allPeers.length <= 1 || replicationFactor <= 1) return [primary];
+  const replicas: RouteHop[] = [primary];
+  // Add additional peers as replicas, capped at replicationFactor.
+  for (const peerId of allPeers) {
+    if (replicas.length >= replicationFactor) break;
+    if (peerId === primary.to_node_id) continue;
+    replicas.push({
+      ...primary,
+      to_node_id: peerId,
+      est_reliability: Math.max(0.3, (primary.est_reliability ?? 0.5) * 0.8),
+    });
+  }
+  return replicas;
+}
 
-// Re-export public helpers (re-exporting imports for the API surface)
-// (createInMemoryBundleStore is already `export function` above — no duplicate export here.)
-export type { UniversalIdentity, UniversalIdentityRef };
+/**
+ * Pick the transport that (a) matches the hop's transport type AND (b) actually
+ * has the target peer in its peer set. A node may have multiple transports of
+ * the same type on different buses; the wrong one would fail the send.
+ *
+ * This is a server-layer helper (Architecture Constitution Article I.7). It
+ * casts to LoopbackTransport's peer Set — in P4 when Android transports are
+ * added, the Transport interface should expose a `canReach(node_id)` method.
+ */
+function pickTransportForHop(
+  transports: Transport[],
+  hop: { transport?: RouteHop['transport']; to_node_id?: string },
+): Transport | undefined {
+  return transports.find((t) => {
+    if (t.transport_type !== hop.transport) return false;
+    if (!hop.to_node_id) return true;
+    const anyT = t as unknown as { peers?: Set<string> };
+    return anyT.peers ? anyT.peers.has(hop.to_node_id) : true;
+  });
+}
+
+export type { UniversalIdentity, UniversalIdentityRef, Proof, CommunicationBundle };

@@ -46,7 +46,7 @@ phases:
 
   - id: P3
     name: DTN
-    status: PENDING
+    status: DONE
     items:
       - persistent_bundle_store
       - ttl_expiry_sweeper

@@ -18,6 +18,9 @@ import {
   tryDecryptBundleAction,
   markReadAction,
   resetNetworkAction,
+  getRelayForwardProofsAction,
+  sweepOnceAction,
+  getSweeperStatusAction,
 } from '@/app/actions/commos';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
@@ -28,6 +31,7 @@ import { Label } from '@/components/ui/label';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { ScrollArea } from '@/components/ui/scroll-area';
 import { Separator } from '@/components/ui/separator';
+import { Switch } from '@/components/ui/switch';
 import { Toaster } from '@/components/ui/toaster';
 import { useToast } from '@/hooks/use-toast';
 import {
@@ -45,6 +49,10 @@ import {
   Clock,
   CheckCircle2,
   XCircle,
+  RefreshCw,
+  GitBranch,
+  Layers,
+  Server,
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 
@@ -65,6 +73,7 @@ interface NetworkState {
 
 interface DeliverySnapshot {
   bundle_id: string;
+  node_id?: string; // P3: per-node delivery state
   current: string;
   history: Array<{ ts: number; from?: string; to: string; node?: string; transport?: string; note?: string }>;
   updated_at: number;
@@ -125,26 +134,32 @@ export default function Home() {
   const [selectedBundleId, setSelectedBundleId] = useState<string | null>(null);
   const [lastDispatch, setLastDispatch] = useState<DispatchResponse | null>(null);
   const [decryptResult, setDecryptResult] = useState<{ ok: boolean; plaintext?: string; reason?: string } | null>(null);
+  const [proofsView, setProofsView] = useState<{ bundle_id: string; proofs: Array<{ kind: string; signer_id: string; ts: number; verified: boolean }> } | null>(null);
+  const [sweeperStatus, setSweeperStatus] = useState<{ running: boolean; last?: { expired_count: number; ts: number } } | null>(null);
 
   const [fromNode, setFromNode] = useState('alice');
   const [toNode, setToNode] = useState('bob');
   const [intentType, setIntentType] = useState<'SEND_MESSAGE' | 'NOTIFY' | 'REQUEST_RESPONSE' | 'DELIVER_DOCUMENT' | 'SEND_MEDIA' | 'EMERGENCY_ALERT' | 'SYNC_CONVERSATION'>('SEND_MESSAGE');
   const [priority, setPriority] = useState<'BULK' | 'NORMAL' | 'PRIORITY' | 'URGENT' | 'EMERGENCY'>('NORMAL');
   const [plaintext, setPlaintext] = useState('Hello from offline-first fabric — encrypted end-to-end, relayed without Internet.');
+  const [replicate, setReplicate] = useState(false);
 
   const refresh = useCallback(async () => {
-    const [n, ns, dl, q] = await Promise.all([
+    const [n, ns, dl, q, ss] = await Promise.all([
       getNetworkStateAction(),
       listNodesAction(),
       getDeliverySnapshotsAction(),
       getQueuedBundlesAction(),
+      getSweeperStatusAction(),
     ]);
     // Defer state updates out of the effect-render cycle to avoid cascading renders.
     setTimeout(() => {
       setNetwork(n);
       setNodes(ns as NodeDescriptor[]);
-      setDelivery(dl);
-      setQueues(q);
+      // deliverySnapshots returns a Promise (P3: now async because Prisma-backed).
+      Promise.resolve(dl).then((d) => setDelivery(d));
+      Promise.resolve(q).then((qq) => setQueues(qq));
+      setSweeperStatus(ss as any);
     }, 0);
   }, []);
 
@@ -166,14 +181,17 @@ export default function Home() {
       plaintext,
       intent_type: intentType,
       priority,
+      replicate,
     });
     setLastDispatch(res);
     if (res.status === 'DISPATCHED' || res.status === 'QUEUED') {
       toast({
         title: `Bundle ${res.status.toLowerCase()}`,
-        description: res.route_plan
-          ? `${res.route_plan.hops.length} hop(s): ${res.route_plan.rationale.slice(0, 80)}...`
-          : 'Queued for later delivery (DTN semantics).',
+        description: res.replicas_sent
+          ? `Replicated to ${res.replicas_sent} peer(s) — first delivery wins.`
+          : res.route_plan
+            ? `${res.route_plan.hops.length} hop(s): ${res.route_plan.rationale.slice(0, 80)}...`
+            : 'Queued for later delivery (DTN semantics).',
       });
       if (res.bundle_id) setSelectedBundleId(res.bundle_id);
     } else {
@@ -184,7 +202,7 @@ export default function Home() {
       });
     }
     await refresh();
-  }, [fromNode, toNode, plaintext, intentType, priority, toast, refresh]);
+  }, [fromNode, toNode, plaintext, intentType, priority, replicate, toast, refresh]);
 
   const onTryDecrypt = useCallback(async () => {
     if (!selectedBundleId) return;
@@ -209,11 +227,34 @@ export default function Home() {
     await refresh();
   }, [selectedBundleId, toNode, toast, refresh]);
 
+  const onSweepOnce = useCallback(async () => {
+    const res = await sweepOnceAction();
+    toast({
+      title: `TTL sweep ran`,
+      description: `Expired ${res.expired_count} bundle(s).`,
+    });
+    await refresh();
+  }, [toast, refresh]);
+
+  const onViewProofs = useCallback(async () => {
+    if (!selectedBundleId) return;
+    const res = await getRelayForwardProofsAction(selectedBundleId);
+    setProofsView(res ?? null);
+    if (res) {
+      const relayCount = res.proofs.filter((p) => p.kind === 'RELAY_FORWARD').length;
+      toast({
+        title: `Proof chain`,
+        description: `${res.proofs.length} proof(s): 1 sender + ${relayCount} relay forward(s)`,
+      });
+    }
+  }, [selectedBundleId, toast]);
+
   const onReset = useCallback(async () => {
     await resetNetworkAction();
     setSelectedBundleId(null);
     setLastDispatch(null);
     setDecryptResult(null);
+    setProofsView(null);
     await refresh();
     toast({ title: 'Network reset' });
   }, [refresh, toast]);
@@ -235,11 +276,14 @@ export default function Home() {
             setPriority={setPriority}
             plaintext={plaintext}
             setPlaintext={setPlaintext}
+            replicate={replicate}
+            setReplicate={setReplicate}
             nodes={nodes}
             onDispatch={onDispatch}
             lastDispatch={lastDispatch}
           />
           <NetworkTopology network={network} nodes={nodes} />
+          <DtnStatusCard sweeperStatus={sweeperStatus} onSweepOnce={onSweepOnce} queues={queues} />
           <DeliveryTimeline
             delivery={delivery}
             queues={queues}
@@ -248,6 +292,8 @@ export default function Home() {
             decryptResult={decryptResult}
             onTryDecrypt={onTryDecrypt}
             onMarkRead={onMarkRead}
+            onViewProofs={onViewProofs}
+            proofsView={proofsView}
             toNode={toNode}
           />
         </section>
@@ -278,7 +324,7 @@ function Header() {
           </div>
         </div>
         <Badge variant="outline" className="border-emerald-500 text-emerald-400">
-          P0 · P1 · P2 live
+          P0 · P1 · P2 · P3 live
         </Badge>
       </div>
     </header>
@@ -343,6 +389,8 @@ function DispatchComposer(props: {
   setPriority: (s: any) => void;
   plaintext: string;
   setPlaintext: (s: string) => void;
+  replicate: boolean;
+  setReplicate: (b: boolean) => void;
   nodes: NodeDescriptor[];
   onDispatch: () => void;
   lastDispatch: DispatchResponse | null;
@@ -358,6 +406,8 @@ function DispatchComposer(props: {
     setPriority,
     plaintext,
     setPlaintext,
+    replicate,
+    setReplicate,
     nodes,
     onDispatch,
     lastDispatch,
@@ -450,11 +500,16 @@ function DispatchComposer(props: {
           />
         </div>
 
-        <div className="flex items-center gap-2">
+        <div className="flex flex-wrap items-center gap-3">
           <Button onClick={onDispatch} className="bg-emerald-600 hover:bg-emerald-500">
             <Send className="w-4 h-4 mr-2" /> Dispatch Bundle
           </Button>
-          <span className="text-xs text-slate-400">
+          <label className="flex items-center gap-2 text-xs text-slate-300 cursor-pointer select-none">
+            <Switch checked={replicate} onCheckedChange={setReplicate} />
+            <Layers className="w-3.5 h-3.5 text-amber-400" />
+            <span>Replicate to N relays <span className="text-slate-500">(P3.4)</span></span>
+          </label>
+          <span className="text-xs text-slate-400 hidden md:inline">
             Bundle is end-to-end encrypted to recipient&apos;s X25519 key. Relay cannot decrypt.
           </span>
         </div>
@@ -468,6 +523,12 @@ function DispatchComposer(props: {
                 <XCircle className="w-4 h-4 text-red-400" />
               )}
               <span className="font-mono text-sm">{lastDispatch.status}</span>
+              {lastDispatch.replicas_sent !== undefined && lastDispatch.replicas_sent > 0 && (
+                <Badge variant="outline" className="border-amber-500 text-amber-400 text-[10px]">
+                  <Layers className="w-3 h-3 mr-1" />
+                  {lastDispatch.replicas_sent} replica(s) sent
+                </Badge>
+              )}
               {lastDispatch.bundle_id && (
                 <span className="text-xs text-slate-500 font-mono truncate">
                   bundle_id: {lastDispatch.bundle_id.slice(0, 18)}…
@@ -582,6 +643,73 @@ function CapRow({ label, items, color }: { label: string; items: string[]; color
   );
 }
 
+function DtnStatusCard({
+  sweeperStatus,
+  onSweepOnce,
+  queues,
+}: {
+  sweeperStatus: { running: boolean; last?: { expired_count: number; ts: number } } | null;
+  onSweepOnce: () => void;
+  queues: QueuedBundle[];
+}) {
+  return (
+    <Card className="bg-slate-900/70 border-slate-800">
+      <CardHeader>
+        <CardTitle className="flex items-center gap-2 text-base">
+          <Server className="w-4 h-4 text-purple-400" />
+          DTN Status
+        </CardTitle>
+        <CardDescription className="text-slate-400">
+          Persistent bundle store · TTL sweeper · Dedup index · Replication fan-out.
+          Survives process restart.
+        </CardDescription>
+      </CardHeader>
+      <CardContent className="space-y-3">
+        <div className="grid grid-cols-3 gap-3">
+          <StatBlock
+            label="TTL Sweeper"
+            value={sweeperStatus?.running ? 'RUNNING' : 'STOPPED'}
+            color={sweeperStatus?.running ? 'emerald' : 'slate'}
+          />
+          <StatBlock
+            label="Queued Bundles"
+            value={String(queues.length)}
+            color="amber"
+          />
+          <StatBlock
+            label="Last Sweep Expired"
+            value={sweeperStatus?.last ? String(sweeperStatus.last.expired_count) : '—'}
+            color="purple"
+          />
+        </div>
+        <div className="flex items-center gap-2">
+          <Button size="sm" variant="outline" onClick={onSweepOnce} className="border-purple-600 text-purple-300 hover:bg-purple-950">
+            <RefreshCw className="w-3 h-3 mr-1" /> Run TTL Sweep Once
+          </Button>
+          <span className="text-[10px] text-slate-500 font-mono">
+            Protocol §10: bundle MUST NOT be re-forwarded after expiry. EXPIRED is terminal.
+          </span>
+        </div>
+      </CardContent>
+    </Card>
+  );
+}
+
+function StatBlock({ label, value, color }: { label: string; value: string; color: string }) {
+  const colorMap: Record<string, string> = {
+    emerald: 'border-emerald-500 text-emerald-400',
+    amber: 'border-amber-500 text-amber-400',
+    purple: 'border-purple-500 text-purple-400',
+    slate: 'border-slate-600 text-slate-400',
+  };
+  return (
+    <div className={cn('rounded-lg border bg-slate-950/50 p-3', colorMap[color])}>
+      <div className="text-[10px] uppercase tracking-wider opacity-70">{label}</div>
+      <div className="font-mono text-sm font-semibold mt-1">{value}</div>
+    </div>
+  );
+}
+
 function DeliveryTimeline({
   delivery,
   queues,
@@ -590,6 +718,8 @@ function DeliveryTimeline({
   decryptResult,
   onTryDecrypt,
   onMarkRead,
+  onViewProofs,
+  proofsView,
   toNode,
 }: {
   delivery: DeliverySnapshot[];
@@ -599,6 +729,8 @@ function DeliveryTimeline({
   decryptResult: { ok: boolean; plaintext?: string; reason?: string } | null;
   onTryDecrypt: () => void;
   onMarkRead: () => void;
+  onViewProofs: () => void;
+  proofsView: { bundle_id: string; proofs: Array<{ kind: string; signer_id: string; ts: number; verified: boolean }> } | null;
   toNode: string;
 }) {
   return (
@@ -658,10 +790,34 @@ function DeliveryTimeline({
               <Button size="sm" variant="outline" onClick={onMarkRead} className="border-slate-600 text-slate-200 hover:bg-slate-800">
                 Mark READ
               </Button>
+              <Button size="sm" variant="outline" onClick={onViewProofs} className="border-purple-600 text-purple-300 hover:bg-purple-950">
+                <GitBranch className="w-3 h-3 mr-1" /> View Proof Chain
+              </Button>
             </div>
             {decryptResult && (
               <div className={cn('text-xs font-mono rounded p-2', decryptResult.ok ? 'bg-emerald-950/50 text-emerald-200' : 'bg-red-950/50 text-red-300')}>
                 {decryptResult.ok ? `✓ ${decryptResult.plaintext}` : `✗ ${decryptResult.reason}`}
+              </div>
+            )}
+            {proofsView && (
+              <div className="rounded border border-purple-800/50 bg-purple-950/20 p-2 space-y-1">
+                <div className="text-[10px] uppercase tracking-wider text-purple-400">
+                  Proof Chain · {proofsView.proofs.length} proof(s) for {proofsView.bundle_id.slice(0, 18)}…
+                </div>
+                {proofsView.proofs.map((p, i) => (
+                  <div key={i} className="flex items-center gap-2 text-xs font-mono">
+                    {p.verified ? (
+                      <CheckCircle2 className="w-3 h-3 text-emerald-400" />
+                    ) : (
+                      <XCircle className="w-3 h-3 text-red-400" />
+                    )}
+                    <Badge variant="outline" className={cn('text-[10px]', p.kind === 'SENDER_SIGNATURE' ? 'border-cyan-500 text-cyan-400' : 'border-purple-500 text-purple-400')}>
+                      {p.kind}
+                    </Badge>
+                    <span className="text-slate-300">signer: {p.signer_id.slice(0, 8)}…</span>
+                    <span className="text-slate-500">ts: {new Date(p.ts).toLocaleTimeString()}</span>
+                  </div>
+                ))}
               </div>
             )}
           </div>
@@ -681,7 +837,15 @@ function DeliveryRow({ delivery, selected, onSelect }: { delivery: DeliverySnaps
       )}
     >
       <div className="flex items-center justify-between mb-2">
-        <div className="font-mono text-xs text-slate-400">{delivery.bundle_id.slice(0, 18)}…</div>
+        <div className="flex items-center gap-2">
+          <span className="font-mono text-xs text-slate-400">{delivery.bundle_id.slice(0, 14)}…</span>
+          {delivery.node_id && (
+            <Badge variant="outline" className="text-[9px] border-slate-700 text-slate-400 font-mono">
+              <Server className="w-2.5 h-2.5 mr-1" />
+              {delivery.node_id}
+            </Badge>
+          )}
+        </div>
         <Badge variant="outline" className={cn('text-[10px] border-slate-700', STATE_COLORS[delivery.current] ?? 'bg-slate-500', 'text-white')}>
           {delivery.current}
         </Badge>
@@ -774,7 +938,7 @@ function RoadmapCard() {
     { id: 'P0', name: 'Constitutional Foundation', status: 'DONE' },
     { id: 'P1', name: 'Universal Protocol', status: 'DONE' },
     { id: 'P2', name: 'Local Transport', status: 'DONE' },
-    { id: 'P3', name: 'DTN', status: 'PENDING' },
+    { id: 'P3', name: 'DTN', status: 'DONE' },
     { id: 'P4', name: 'Android Edge', status: 'PENDING' },
     { id: 'P5', name: 'Multi-hop Edge', status: 'PENDING' },
     { id: 'P6', name: 'Internet Gateway', status: 'PENDING' },
@@ -857,7 +1021,7 @@ function Footer({ onReset }: { onReset: () => void }) {
     <footer className="mt-auto border-t border-slate-800 bg-slate-900/50">
       <div className="container mx-auto px-4 py-3 flex items-center justify-between">
         <div className="text-[10px] text-slate-500 font-mono">
-          bundle → transport → destination (no Internet required) · ARCH-001..020 · tested in CI
+          bundle → transport → destination (no Internet required) · ARCH-001..024 · tested in CI
         </div>
         <Button size="sm" variant="outline" onClick={onReset} className="border-slate-700 text-slate-400 hover:bg-slate-800 text-xs">
           Reset Network

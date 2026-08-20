@@ -49,6 +49,23 @@ export async function markReadAction(bundle_id: string, at_node_id: string) {
 
 export async function resetNetworkAction() {
   const net = getNetwork();
-  net.reset();
+  await net.reset();
   return { ok: true };
+}
+
+// P3 additions
+
+export async function getRelayForwardProofsAction(bundle_id: string) {
+  const net = getNetwork();
+  return net.relayForwardProofs(bundle_id);
+}
+
+export async function sweepOnceAction() {
+  const net = getNetwork();
+  return net.sweepOnce();
+}
+
+export async function getSweeperStatusAction() {
+  const net = getNetwork();
+  return net.sweeperStatus();
 }

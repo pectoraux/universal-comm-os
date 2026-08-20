@@ -30,13 +30,13 @@ Implementation sequencing per the master prompt. Vertical from the protocol outw
 - [x] Basic transport negotiation via capabilities
 - Proves `Bundle → transport → destination` without Internet.
 
-## P3 — DTN
-- [ ] Persistent bundle store (Prisma-backed)
-- [ ] TTL expiry sweeper
-- [ ] Deduplication index
-- [ ] Replication policy
-- [ ] Multi-hop forwarding (A → B → C)
-- [ ] Routing metadata propagation
+## P3 — DTN  (DONE in this iteration)
+- [x] Persistent bundle store (Prisma-backed: `StoredBundle`, `ReceivedBundle`, `DeliveryEvent` tables)
+- [x] TTL expiry sweeper (background task; protocol-level `isExpired()` check)
+- [x] Deduplication index (unique (node_id, bundle_id) constraint + in-memory Set fallback)
+- [x] Replication policy (`replicate=true` flag → fan-out to N peers; first OK wins; canonical bundle_id dedup at recipient)
+- [x] Multi-hop forwarding (relay runs its own router, picks transport that reaches the next peer)
+- [x] Routing metadata propagation (relay signs `RELAY_FORWARD` proof and appends to bundle's `proofs[]`)
 
 ## P4 — Android Edge
 - [ ] Bluetooth / BLE / Wi-Fi transport implementations (Android)
