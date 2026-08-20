@@ -89,15 +89,17 @@ Implementation sequencing per the master prompt. Vertical from the protocol outw
 - [ ] Consent + preferences (deferred — not needed for the demo's send path)
 - [ ] Federated identity propagation via identity-gossip (deferred — demo uses a shared singleton graph)
 
-## P11 — Consumer Application
-- [ ] Unified inbox
-- [ ] Conversations
-- [ ] Contacts
-- [ ] Offline queue UI
-- [ ] Network state UI
-- [ ] Delivery status UI
-- [ ] Gateway visibility
-- [ ] Identity management UI
+## P11 — Consumer Application  (DONE in this iteration)
+- [x] Unified inbox: `RecipientInbox` in CommOS auto-decrypts bundles on DELIVERED using the node's X25519 secret key
+- [x] Conversations: messages grouped by `conversation_id`, sorted by most recent, with unread counts
+- [x] `onDelivered` callback in NodeRuntimeDeps — CommOS registers it for each node, auto-decrypts + adds to inbox
+- [x] Contacts: identity graph (P10) provides the contact directory
+- [x] Offline queue: DTN store-and-forward queue (P3) + queue UI
+- [x] Network state: capability cache (P5) + topology view
+- [x] Delivery status: per-node delivery state machine (P3) + timeline UI
+- [x] Gateway visibility: email transcript (P6) + gateway state transitions
+- [x] Identity management: identity graph (P10) + link/unlink UI
+- [x] Mark conversation as read: transitions delivery state to READ
 
 ## P12 — Business Platform
 - [ ] Organizations, teams, shared inboxes

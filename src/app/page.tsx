@@ -26,6 +26,8 @@ import {
   gossipNowAction,
   getIdentityGraphAction,
   linkIdentityToChannelAction,
+  getInboxAction,
+  markConversationReadAction,
 } from '@/app/actions/commos';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
@@ -60,6 +62,8 @@ import {
   Server,
   Users,
   Link2,
+  Inbox,
+  Mail,
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 
@@ -146,6 +150,8 @@ export default function Home() {
   const [emailTranscript, setEmailTranscript] = useState<Array<{ message_id: string; to: string; from: string; subject: string; body: string; sent_at: number; bundle_id: string }>>([]);
   const [capabilityCaches, setCapabilityCaches] = useState<Array<{ node_id: string; entries: Array<any> }>>([]);
   const [identityGraph, setIdentityGraph] = useState<Array<any>>([]);
+  const [inbox, setInbox] = useState<Array<{ conversation_id: string; messages: Array<any>; unread_count: number }>>([]);
+  const [inboxNode, setInboxNode] = useState('bob');
 
   const [fromNode, setFromNode] = useState('alice');
   const [toNode, setToNode] = useState('bob');
@@ -158,7 +164,7 @@ export default function Home() {
   const [replicate, setReplicate] = useState(false);
 
   const refresh = useCallback(async () => {
-    const [n, ns, dl, q, ss, et, cc, ig] = await Promise.all([
+    const [n, ns, dl, q, ss, et, cc, ig, ib] = await Promise.all([
       getNetworkStateAction(),
       listNodesAction(),
       getDeliverySnapshotsAction(),
@@ -167,6 +173,7 @@ export default function Home() {
       getEmailTranscriptAction(),
       getCapabilityCachesAction(),
       getIdentityGraphAction(),
+      getInboxAction(inboxNode),
     ]);
     // Defer state updates out of the effect-render cycle to avoid cascading renders.
     setTimeout(() => {
@@ -178,8 +185,9 @@ export default function Home() {
       setEmailTranscript(et as any);
       setCapabilityCaches(cc as any);
       setIdentityGraph(ig as any);
+      Promise.resolve(ib).then((i) => setInbox(i as any));
     }, 0);
-  }, []);
+  }, [inboxNode]);
 
   useEffect(() => {
     // Initial load (NOT setState in effect body — wrapped in setTimeout via refresh).
@@ -288,6 +296,14 @@ export default function Home() {
     await refresh();
   }, [toast, refresh]);
 
+  const onMarkConversationRead = useCallback(async (conversation_id: string) => {
+    const res = await markConversationReadAction(inboxNode, conversation_id);
+    if (res.ok) {
+      toast({ title: `Marked ${res.marked} message(s) as read` });
+    }
+    await refresh();
+  }, [inboxNode, toast, refresh]);
+
   const onReset = useCallback(async () => {
     await resetNetworkAction();
     setSelectedBundleId(null);
@@ -330,6 +346,13 @@ export default function Home() {
           <IdentityGraphCard graph={identityGraph} nodes={nodes} onLinkIdentity={onLinkIdentity} />
           <DtnStatusCard sweeperStatus={sweeperStatus} onSweepOnce={onSweepOnce} queues={queues} />
           <EmailTranscriptCard transcript={emailTranscript} />
+          <InboxCard
+            inbox={inbox}
+            inboxNode={inboxNode}
+            setInboxNode={setInboxNode}
+            nodes={nodes}
+            onMarkRead={onMarkConversationRead}
+          />
           <DeliveryTimeline
             delivery={delivery}
             queues={queues}
@@ -370,7 +393,7 @@ function Header() {
           </div>
         </div>
         <Badge variant="outline" className="border-emerald-500 text-emerald-400">
-          P0 · P1 · P2 · P3 · P5 · P6 · P9 · P10 live
+          P0 · P1 · P2 · P3 · P5 · P6 · P9 · P10 · P11 live
         </Badge>
       </div>
     </header>
@@ -1016,6 +1039,124 @@ function EmailTranscriptCard({ transcript }: { transcript: Array<{ message_id: s
   );
 }
 
+function InboxCard({
+  inbox,
+  inboxNode,
+  setInboxNode,
+  nodes,
+  onMarkRead,
+}: {
+  inbox: Array<{ conversation_id: string; messages: Array<any>; unread_count: number }>;
+  inboxNode: string;
+  setInboxNode: (s: string) => void;
+  nodes: NodeDescriptor[];
+  onMarkRead: (conversation_id: string) => void;
+}) {
+  const [expandedConv, setExpandedConv] = useState<string | null>(null);
+
+  return (
+    <Card className="bg-slate-900/70 border-slate-800">
+      <CardHeader>
+        <CardTitle className="flex items-center gap-2 text-base">
+          <Inbox className="w-4 h-4 text-emerald-400" />
+          Unified Inbox (P11 — Consumer Application)
+        </CardTitle>
+        <CardDescription className="text-slate-400">
+          Bob&apos;s inbox shows decrypted messages grouped by conversation. Auto-decrypted on delivery using the recipient&apos;s X25519 secret key.
+        </CardDescription>
+      </CardHeader>
+      <CardContent className="space-y-4">
+        <div className="flex items-center gap-3">
+          <Label className="text-xs uppercase tracking-wider text-slate-400">View inbox of</Label>
+          <Select value={inboxNode} onValueChange={setInboxNode}>
+            <SelectTrigger className="w-48 h-8 text-xs">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              {nodes.map((n) => (
+                <SelectItem key={n.node_id} value={n.node_id}>{n.display_name}</SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        </div>
+
+        {inbox.length === 0 ? (
+          <div className="text-sm text-slate-500 italic">
+            No messages in {inboxNode}&apos;s inbox yet. Dispatch a bundle to this node above.
+          </div>
+        ) : (
+          <ScrollArea className="max-h-[500px] pr-3">
+            <div className="space-y-2">
+              {inbox.map((conv) => (
+                <div key={conv.conversation_id} className="rounded-lg border border-slate-800 bg-slate-950/50 p-3">
+                  <div
+                    className="flex items-center justify-between cursor-pointer"
+                    onClick={() => setExpandedConv(expandedConv === conv.conversation_id ? null : conv.conversation_id)}
+                  >
+                    <div className="flex items-center gap-2">
+                      <Mail className="w-3.5 h-3.5 text-cyan-400" />
+                      <span className="font-mono text-xs text-slate-300">{conv.conversation_id}</span>
+                      {conv.unread_count > 0 && (
+                        <Badge variant="outline" className="border-emerald-500 text-emerald-400 text-[10px]">
+                          {conv.unread_count} unread
+                        </Badge>
+                      )}
+                    </div>
+                    <span className="text-[10px] text-slate-500">{conv.messages.length} message(s)</span>
+                  </div>
+
+                  {expandedConv === conv.conversation_id && (
+                    <div className="mt-3 space-y-2">
+                      {conv.messages.map((msg: any, i: number) => (
+                        <div key={msg.bundle_id || i} className={cn(
+                          'rounded border p-2 text-xs',
+                          msg.read ? 'border-slate-800 bg-slate-950/30' : 'border-emerald-700/50 bg-emerald-950/20',
+                        )}>
+                          <div className="flex items-center justify-between mb-1">
+                            <span className="font-mono text-[10px] text-slate-400">
+                              from: {msg.sender.display_name ?? msg.sender.id.slice(0, 12)}…
+                            </span>
+                            <div className="flex items-center gap-2">
+                              <span className="text-[10px] text-slate-500">{new Date(msg.received_at).toLocaleTimeString()}</span>
+                              <Badge variant="outline" className={cn(
+                                'text-[9px]',
+                                msg.delivery_state === 'READ' ? 'border-emerald-500 text-emerald-400' : 'border-amber-500 text-amber-400',
+                              )}>
+                                {msg.delivery_state}
+                              </Badge>
+                            </div>
+                          </div>
+                          <p className="text-slate-200 font-mono text-xs">{msg.plaintext}</p>
+                        </div>
+                      ))}
+                      {conv.unread_count > 0 && (
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          onClick={() => onMarkRead(conv.conversation_id)}
+                          className="border-emerald-600 text-emerald-400 hover:bg-emerald-950 h-7 text-xs"
+                        >
+                          <CheckCircle2 className="w-3 h-3 mr-1" /> Mark conversation as read
+                        </Button>
+                      )}
+                    </div>
+                  )}
+
+                  {expandedConv !== conv.conversation_id && conv.messages.length > 0 && (
+                    <div className="mt-1 text-[10px] text-slate-500 truncate">
+                      Last: {conv.messages[conv.messages.length - 1]?.plaintext.slice(0, 60)}…
+                    </div>
+                  )}
+                </div>
+              ))}
+            </div>
+          </ScrollArea>
+        )}
+      </CardContent>
+    </Card>
+  );
+}
+
 function DeliveryTimeline({
   delivery,
   queues,
@@ -1252,7 +1393,7 @@ function RoadmapCard() {
     { id: 'P8', name: 'External Channels', status: 'PENDING' },
     { id: 'P9', name: 'Intelligent Routing', status: 'DONE' },
     { id: 'P10', name: 'Universal Identity Graph', status: 'DONE' },
-    { id: 'P11', name: 'Consumer Application', status: 'PENDING' },
+    { id: 'P11', name: 'Consumer Application', status: 'DONE' },
     { id: 'P12', name: 'Business Platform', status: 'PENDING' },
     { id: 'P13', name: 'Community Network', status: 'PENDING' },
     { id: 'P14', name: 'AI', status: 'PENDING' },
@@ -1327,7 +1468,7 @@ function Footer({ onReset }: { onReset: () => void }) {
     <footer className="mt-auto border-t border-slate-800 bg-slate-900/50">
       <div className="container mx-auto px-4 py-3 flex items-center justify-between">
         <div className="text-[10px] text-slate-500 font-mono">
-          bundle → transport → destination (no Internet required) · ARCH-001..037 · tested in CI
+          bundle → transport → destination (no Internet required) · ARCH-001..040 · tested in CI
         </div>
         <Button size="sm" variant="outline" onClick={onReset} className="border-slate-700 text-slate-400 hover:bg-slate-800 text-xs">
           Reset Network

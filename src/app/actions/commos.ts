@@ -102,9 +102,6 @@ export async function linkIdentityToChannelAction(input: {
   channel: 'EMAIL' | 'SMS' | 'WHATSAPP' | 'MATRIX' | 'TELEGRAM' | 'INSTAGRAM' | 'MESSENGER' | 'RCS';
   channel_id: string;
 }) {
-  // Look up the node's identity + keypair from the network.
-  // This is a demo-only action — in production, the user's client would
-  // sign the proof locally and submit it to the network.
   const net = getNetwork();
   const rt = (net as any).runtimes.get(input.node_id);
   if (!rt) return { ok: false, error: `unknown node ${input.node_id}` };
@@ -114,4 +111,16 @@ export async function linkIdentityToChannelAction(input: {
   return {
     ok: net.linkIdentityToChannel(identity, keypair, input.channel, input.channel_id),
   };
+}
+
+// P11 additions
+
+export async function getInboxAction(node_id: string) {
+  const net = getNetwork();
+  return net.getInbox(node_id);
+}
+
+export async function markConversationReadAction(node_id: string, conversation_id: string) {
+  const net = getNetwork();
+  return net.markConversationRead(node_id, conversation_id);
 }

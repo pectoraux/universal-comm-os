@@ -53,6 +53,19 @@ import { EmailAdapter, type EmailTranscript, type EmailTranscriptEntry } from '@
 import { utf8Encode, utf8Decode, b64urlEncode } from '@/core/util/encoding';
 import { db } from '@/lib/db';
 
+export interface InboxMessage {
+  bundle_id: string;
+  conversation_id: string;
+  sender: { id: string; signing_pubkey_hash: string; display_name?: string };
+  plaintext: string;
+  received_at: number;
+  read: boolean;
+  /** The delivery state machine's final state at the recipient (DELIVERED or READ). */
+  delivery_state: string;
+  /** The node that delivered this bundle to us (the last relay). */
+  from_node_id: string;
+}
+
 export interface NodeDescriptor {
   node_id: string;
   display_name: string;
@@ -146,6 +159,12 @@ class SimulatedNetwork {
    * federated directory. In the demo, all nodes share this singleton.
    */
   identityGraph: IdentityGraph = createIdentityGraph();
+  /**
+   * P11: Recipient inbox. When a bundle reaches DELIVERED at a node, CommOS
+   * auto-decrypts it (using the node's encryption secret key) and stores it
+   * here, grouped by node_id → conversation_id → messages[].
+   */
+  inbox: Map<string, InboxMessage[]> = new Map();
   /** True = use persistent Prisma store; false = use in-memory store. */
   readonly persistent: boolean;
   readonly sweeper: TtlSweeper;
@@ -220,6 +239,103 @@ class SimulatedNetwork {
     proof: any;
   } | undefined {
     return this.identityGraph.resolveChannelRecipient(channel as any, channel_id);
+  }
+
+  // ──────────────────────────────────────────────────────────────────────
+  // P11: Recipient Inbox (ARCH-038, ARCH-039, ARCH-040).
+  //
+  // When a bundle reaches DELIVERED at a node, CommOS auto-decrypts it
+  // using the node's encryption secret key and stores it in the inbox.
+  // The inbox is grouped by conversation_id for the unified-inbox UI.
+  // ──────────────────────────────────────────────────────────────────────
+
+  /**
+   * P11: handle a bundle that reached DELIVERED at a node. Auto-decrypts
+   * the bundle using the node's encryption secret key and adds it to the inbox.
+   */
+  handleDelivered(node_id: string, bundle: CommunicationBundle, from_node_id: string): void {
+    const entry = this.identities.get(node_id);
+    if (!entry) return;
+    // Only inbox bundles addressed to THIS node's identity.
+    if (bundle.recipient.kind !== 'IDENTITY' || bundle.recipient.ref.id !== entry.identity.id) return;
+    // Don't double-add (dedup by bundle_id).
+    const existing = this.inbox.get(node_id);
+    if (existing && existing.some((m) => m.bundle_id === bundle.bundle_id)) return;
+
+    // Decrypt the bundle.
+    const env = { encryption_metadata: bundle.encryption_metadata, payload: bundle.payload };
+    if (!isRecipientFor(env, entry.identity.public_keys.encryption_pubkey)) return;
+    let plaintext: string;
+    try {
+      const pt = openSealedPayload(env, entry.encryption_sk);
+      plaintext = utf8Decode(pt);
+    } catch {
+      return; // decryption failed — don't inbox
+    }
+
+    const msg: InboxMessage = {
+      bundle_id: bundle.bundle_id,
+      conversation_id: bundle.conversation_id,
+      sender: {
+        id: bundle.sender.id,
+        signing_pubkey_hash: bundle.sender.signing_pubkey_hash,
+        display_name: bundle.sender.display_name,
+      },
+      plaintext,
+      received_at: Date.now(),
+      read: false,
+      delivery_state: 'DELIVERED',
+      from_node_id,
+    };
+
+    if (!this.inbox.has(node_id)) this.inbox.set(node_id, []);
+    this.inbox.get(node_id)!.push(msg);
+  }
+
+  /** P11: get a node's inbox, grouped by conversation_id. */
+  getInbox(node_id: string): Array<{ conversation_id: string; messages: InboxMessage[]; unread_count: number }> {
+    const messages = this.inbox.get(node_id) ?? [];
+    // Group by conversation_id.
+    const byConv = new Map<string, InboxMessage[]>();
+    for (const msg of messages) {
+      if (!byConv.has(msg.conversation_id)) byConv.set(msg.conversation_id, []);
+      byConv.get(msg.conversation_id)!.push(msg);
+    }
+    // Sort conversations by most recent message.
+    const conversations = Array.from(byConv.entries()).map(([conv_id, msgs]) => ({
+      conversation_id: conv_id,
+      messages: msgs.sort((a, b) => a.received_at - b.received_at),
+      unread_count: msgs.filter((m) => !m.read).length,
+    }));
+    conversations.sort((a, b) => {
+      const aLast = a.messages[a.messages.length - 1]?.received_at ?? 0;
+      const bLast = b.messages[b.messages.length - 1]?.received_at ?? 0;
+      return bLast - aLast;
+    });
+    return conversations;
+  }
+
+  /**
+   * P11: mark all messages in a conversation as read. Also transitions the
+   * delivery state machine to READ for each bundle.
+   */
+  markConversationRead(node_id: string, conversation_id: string): { ok: boolean; marked: number } {
+    const messages = this.inbox.get(node_id);
+    if (!messages) return { ok: false, marked: 0 };
+    let marked = 0;
+    const rt = this.runtimes.get(node_id);
+    for (const msg of messages) {
+      if (msg.conversation_id === conversation_id && !msg.read) {
+        msg.read = true;
+        msg.delivery_state = 'READ';
+        marked++;
+        // Transition the delivery state machine to READ.
+        if (rt) {
+          try { rt.delivery.transition(msg.bundle_id, 'READ', { node: node_id }); } catch { /* already terminal */ }
+        }
+      }
+    }
+    return { ok: true, marked };
   }
 
   private setup() {
@@ -323,6 +439,7 @@ class SimulatedNetwork {
       bundleStore: makeStore('alice'),
       signing_secret_key: aliceKp.signing_secret_key,
       capabilityCache: makeCache(),
+      onDelivered: (bundle, from) => this.handleDelivered('alice', bundle, from),
     });
     const bobRT = createNodeRuntime({
       identity: bobId,
@@ -331,6 +448,7 @@ class SimulatedNetwork {
       bundleStore: makeStore('bob'),
       signing_secret_key: bobKp.signing_secret_key,
       capabilityCache: makeCache(),
+      onDelivered: (bundle, from) => this.handleDelivered('bob', bundle, from),
     });
     const relayRT = createNodeRuntime({
       identity: relayId,
@@ -339,6 +457,7 @@ class SimulatedNetwork {
       bundleStore: makeStore('relay'),
       signing_secret_key: relayKp.signing_secret_key,
       capabilityCache: makeCache(),
+      onDelivered: (bundle, from) => this.handleDelivered('relay', bundle, from),
     });
     // P6: Gateway runtime with EmailAdapter (EXPERIMENTAL — in-process transcript).
     // The gateway node is the only node that has the EMAIL gateway capability.
@@ -758,6 +877,7 @@ class SimulatedNetwork {
     this.gatewayRuntimes.clear();
     this.emailTranscript = { entries: [] };
     this.identityGraph.clear();
+    this.inbox.clear();
     // Clear persistent tables too so the demo starts fresh.
     if (this.persistent) {
       await db.storedBundle.deleteMany({});

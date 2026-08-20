@@ -61,6 +61,12 @@ export interface NodeRuntimeDeps {
    * absent, the router falls back to single-hop + epidemic routing.
    */
   capabilityCache?: CapabilityCache;
+  /**
+   * P11: called when a bundle reaches DELIVERED state at this node (i.e.,
+   * this node IS the recipient identity). The caller (CommOS) uses this to
+   * auto-decrypt the bundle and add it to the recipient's inbox.
+   */
+  onDelivered?: (bundle: CommunicationBundle, from_node_id: string) => void;
   /** Optional: gateway-facing adapter registry (legacy, replaced by gatewayRuntime). */
   gatewayRegistry?: Map<string, { node_id: string; channel: string }>;
 }
@@ -249,6 +255,8 @@ export function createNodeRuntime(deps: NodeRuntimeDeps): NodeRuntime {
         // This node IS the destination identity.
         tracker.transition(bundle.bundle_id, 'RELAYED', { node: from_node_id });
         tracker.transition(bundle.bundle_id, 'DELIVERED', { node: deps.capabilities.node_id });
+        // P11: notify the caller (CommOS) so it can auto-decrypt + add to inbox.
+        if (deps.onDelivered) deps.onDelivered(bundle, from_node_id);
         return;
       }
 
