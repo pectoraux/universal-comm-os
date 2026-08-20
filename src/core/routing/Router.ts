@@ -15,17 +15,197 @@
  */
 
 import type { RoutingPolicy } from '@/core/policy/types';
-import type { RouteDecision, RouteHop, RoutePlan, RoutingContext } from './types';
+import type { RouteDecision, RouteHop, RoutePlan, RoutingContext, PeerCapabilities } from './types';
 import type { Intent } from '@/core/intent/types';
 import type { TransportCapabilityType, GatewayCapabilityType } from '@/core/capabilities/types';
 import { isTransportAllowed, isGatewayAllowed } from '@/core/policy/RoutingPolicy';
 
+// ──────────────────────────────────────────────────────────────────────
+// P9: Dynamic hop metrics (ARCH-035, ARCH-036).
+//
+// Per the master prompt §13 and P9: routing should consider cost, latency,
+// reliability, availability, battery, bandwidth, storage, trust, delivery
+// probability, privacy, TTL, priority, capabilities.
+//
+// `computeHopMetrics` derives these from a peer's resource report +
+// verification state + intent constraints. The static est_* values from
+// P3-P8 are replaced by these computed values.
+// ──────────────────────────────────────────────────────────────────────
+
+/** Baseline reliability per hop kind (before resource adjustments). */
+const BASELINE_RELIABILITY: Record<RouteHop['kind'], number> = {
+  TRANSPORT: 0.92, // direct P2P — most reliable
+  RELAY: 0.75,     // store-and-forward — less reliable
+  GATEWAY: 0.85,   // cross-network egress — depends on external channel
+};
+
+/** Baseline latency per hop kind (ms). */
+const BASELINE_LATENCY_MS: Record<RouteHop['kind'], number> = {
+  TRANSPORT: 50,
+  RELAY: 200,
+  GATEWAY: 500,
+};
+
+/** Baseline cost per hop kind (abstract units). */
+const BASELINE_COST: Record<RouteHop['kind'], number> = {
+  TRANSPORT: 1,
+  RELAY: 2,
+  GATEWAY: 5,
+};
+
+/** Verification multipliers — TRUSTED peers are more reliable, UNVERIFIED less. */
+const VERIFICATION_RELIABILITY_MULTIPLIER: Record<PeerCapabilities['verification'], number> = {
+  UNVERIFIED: 0.7,
+  PEER_CORROBORATED: 0.9,
+  TRUSTED: 1.0,
+};
+
+/** Privacy score per verification state (higher = more private). */
+const VERIFICATION_PRIVACY_SCORE: Record<PeerCapabilities['verification'], number> = {
+  UNVERIFIED: 0.3,
+  PEER_CORROBORATED: 0.6,
+  TRUSTED: 0.9,
+};
+
+export interface HopMetrics {
+  reliability: number;
+  latency_ms: number;
+  cost: number;
+  privacy_score: number;
+  /** Delivery probability = reliability adjusted by resource availability. */
+  delivery_probability: number;
+}
+
 /**
- * Compute the rank of a route given the intent's constraints.
- * Higher is better. Returns null if the route violates hard constraints.
+ * P9: compute dynamic hop metrics from a peer's resource report +
+ * verification state + intent constraints.
+ *
+ * Reliability starts at a baseline for the hop kind, then is adjusted by:
+ *   - peer verification state (TRUSTED > PEER_CORROBORATED > UNVERIFIED)
+ *   - peer battery (low battery → lower reliability; <20% is critical)
+ *   - peer bandwidth (low bandwidth → higher latency, slightly lower reliability)
+ *   - peer storage (low storage → can't store-and-forward; penalize RELAY hops)
+ *
+ * Latency is derived from bandwidth (higher bandwidth → lower latency).
+ *
+ * Cost is the baseline + a small factor for resource usage.
+ *
+ * Privacy score is based on verification state.
+ *
+ * Delivery probability = reliability × resource_availability_factor.
+ */
+export function computeHopMetrics(
+  hopKind: RouteHop['kind'],
+  peer: PeerCapabilities | undefined,
+  intent: Intent,
+): HopMetrics {
+  const baselineReliability = BASELINE_RELIABILITY[hopKind];
+  const baselineLatency = BASELINE_LATENCY_MS[hopKind];
+  const baselineCost = BASELINE_COST[hopKind];
+
+  let reliability = baselineReliability;
+  let latency = baselineLatency;
+  let cost = baselineCost;
+  let privacyScore = 0.5; // default if no peer info
+
+  if (peer) {
+    // Verification adjustment.
+    const verMult = VERIFICATION_RELIABILITY_MULTIPLIER[peer.verification] ?? 0.7;
+    reliability *= verMult;
+    privacyScore = VERIFICATION_PRIVACY_SCORE[peer.verification] ?? 0.3;
+
+    // Battery adjustment: <20% is critical, <50% is degraded.
+    const battery = peer.resource?.battery_pct;
+    if (battery !== undefined) {
+      if (battery < 20) reliability *= 0.5;       // critical — likely to disappear
+      else if (battery < 50) reliability *= 0.85;  // degraded
+      // else: full battery — no penalty
+    }
+
+    // Bandwidth adjustment: higher bandwidth → lower latency.
+    const bw = peer.resource?.bandwidth_bps;
+    if (bw !== undefined && bw > 0) {
+      // Latency scales inversely with bandwidth (capped).
+      // 1 Mbps → ~baseline; 10 Mbps → ~baseline/2; 100 Mbps → ~baseline/4.
+      const bwFactor = Math.max(0.25, Math.min(1, 1_000_000 / bw));
+      latency = Math.round(baselineLatency * bwFactor);
+    }
+
+    // Storage adjustment: RELAY hops need storage; low storage → penalize.
+    const storage = peer.resource?.storage_bytes;
+    if (hopKind === 'RELAY' && storage !== undefined) {
+      if (storage < 10_000_000) reliability *= 0.6;        // <10 MB — can't queue much
+      else if (storage < 100_000_000) reliability *= 0.9;  // <100 MB — limited
+    }
+
+    // Compute adjustment: GATEWAY hops may need compute for translation.
+    const compute = peer.resource?.compute_units;
+    if (hopKind === 'GATEWAY' && compute !== undefined && compute < 1) {
+      reliability *= 0.8; // low compute — gateway may be slow
+    }
+  }
+
+  // Intent priority adjustments.
+  if (intent.priority === 'EMERGENCY') {
+    // Emergency: prefer reliability over cost. Cost penalty reduced.
+    cost *= 0.5;
+  } else if (intent.priority === 'BULK') {
+    // Bulk: prefer cost over latency. Latency penalty increased (we don't care).
+    latency = Math.round(latency * 1.5);
+  }
+
+  // Privacy constraint: if intent requires STRICT or FORWARD_SECRECY, penalize
+  // UNVERIFIED peers heavily.
+  if (intent.min_privacy === 'STRICT' || intent.min_privacy === 'FORWARD_SECRECY') {
+    if (peer && peer.verification === 'UNVERIFIED') {
+      reliability *= 0.3;
+      privacyScore *= 0.5;
+    }
+  }
+
+  // Clamp reliability to [0, 1].
+  reliability = Math.max(0, Math.min(1, reliability));
+
+  // Delivery probability = reliability × resource_availability (a separate
+  // factor that captures whether the peer has the resources to actually deliver).
+  let resourceAvailability = 1.0;
+  if (peer?.resource?.battery_pct !== undefined && peer.resource.battery_pct < 20) {
+    resourceAvailability *= 0.6;
+  }
+  if (peer?.resource?.storage_bytes !== undefined && peer.resource.storage_bytes < 10_000_000) {
+    resourceAvailability *= 0.7;
+  }
+  const deliveryProbability = Math.max(0, Math.min(1, reliability * resourceAvailability));
+
+  return {
+    reliability,
+    latency_ms: latency,
+    cost,
+    privacy_score: privacyScore,
+    delivery_probability: deliveryProbability,
+  };
+}
+
+/**
+ * P9: updated rank formula. Weighs all factors per the master prompt §13:
+ *   - reliability (primary)
+ *   - delivery_probability (primary)
+ *   - latency (secondary)
+ *   - cost (tertiary)
+ *   - privacy_score (quaternary — matters when intent.min_privacy is set)
+ *   - trust (via verification state, already folded into reliability)
+ *
+ * Higher rank is better. Returns null if hard constraints are violated.
  */
 function rankRoute(
-  plan: { hops: RouteHop[]; est_reliability: number; est_latency_ms: number; est_cost: number },
+  plan: {
+    hops: RouteHop[];
+    est_reliability: number;
+    est_latency_ms: number;
+    est_cost: number;
+    est_privacy_score?: number;
+    est_delivery_probability?: number;
+  },
   intent: Intent,
   policy: RoutingPolicy,
 ): number | null {
@@ -40,8 +220,23 @@ function rankRoute(
     if (hop.transport && !isTransportAllowed(policy, hop.transport)) return null;
     if (hop.gateway && !isGatewayAllowed(policy, hop.gateway)) return null;
   }
-  // Reliability dominates; latency is secondary; cost is tertiary.
-  return plan.est_reliability * 1000 - plan.est_latency_ms / 10 - plan.est_cost;
+
+  // P9: weighted rank formula.
+  // Reliability + delivery_probability dominate (×1000 each).
+  // Latency is secondary (÷10). Cost is tertiary (×1).
+  // Privacy score is a bonus when intent.min_privacy is set (×100).
+  const reliabilityScore = plan.est_reliability * 1000;
+  const deliveryScore = (plan.est_delivery_probability ?? plan.est_reliability) * 1000;
+  const latencyScore = -plan.est_latency_ms / 10;
+  const costScore = -plan.est_cost;
+  const privacyBonus = intent.min_privacy ? (plan.est_privacy_score ?? 0.5) * 100 : 0;
+
+  // Priority weighting: EMERGENCY prioritizes reliability×2; BULK prioritizes cost×2.
+  let rank = reliabilityScore + deliveryScore + latencyScore + costScore + privacyBonus;
+  if (intent.priority === 'EMERGENCY') rank += reliabilityScore; // double-count reliability
+  if (intent.priority === 'BULK') rank -= costScore; // invert cost (cheaper is better)
+
+  return rank;
 }
 
 function planHopsForPeer(
@@ -332,18 +527,77 @@ function planMultiHopViaKnownNetwork(
   return plans;
 }
 
+/**
+ * P9: look up a peer's capabilities by node_id. Checks known_peers first
+ * (immediate peers, more up-to-date), then known_network (gossiped deep view).
+ */
+function lookupPeer(
+  ctx: RoutingContext,
+  node_id: string | undefined,
+): PeerCapabilities | undefined {
+  if (!node_id) return undefined;
+  for (const p of ctx.known_peers) {
+    if (p.node_id === node_id) return p;
+  }
+  return ctx.known_network?.get(node_id);
+}
+
+/**
+ * P9: populate each hop's est_* with computed values from computeHopMetrics.
+ * The static values from planHopsForPeer are replaced by dynamic values
+ * derived from the peer's resource report + verification state + intent.
+ *
+ * Returns a NEW array of hops (does not mutate the input).
+ */
+function populatePlanMetrics(
+  hops: RouteHop[],
+  ctx: RoutingContext,
+): RouteHop[] {
+  return hops.map((hop) => {
+    const peer = lookupPeer(ctx, hop.to_node_id);
+    const metrics = computeHopMetrics(hop.kind, peer, ctx.intent);
+    return {
+      ...hop,
+      est_reliability: metrics.reliability,
+      est_latency_ms: metrics.latency_ms,
+      est_cost: metrics.cost,
+    };
+  });
+}
+
 function evaluatePlan(
   hops: RouteHop[],
-): { est_reliability: number; est_latency_ms: number; est_cost: number } {
+  ctx: RoutingContext,
+): {
+  est_reliability: number;
+  est_latency_ms: number;
+  est_cost: number;
+  est_privacy_score: number;
+  est_delivery_probability: number;
+} {
   let reliability = 1;
   let latency = 0;
   let cost = 0;
+  let privacyScore = 1; // plan privacy = min of hop privacy scores
+  let deliveryProb = 1;
+
   for (const hop of hops) {
-    reliability *= hop.est_reliability ?? 0.5;
-    latency += hop.est_latency_ms ?? 100;
-    cost += hop.est_cost ?? 1;
+    const peer = lookupPeer(ctx, hop.to_node_id);
+    const metrics = computeHopMetrics(hop.kind, peer, ctx.intent);
+    reliability *= metrics.reliability;
+    latency += metrics.latency_ms;
+    cost += metrics.cost;
+    privacyScore = Math.min(privacyScore, metrics.privacy_score);
+    deliveryProb *= metrics.delivery_probability;
   }
-  return { est_reliability: reliability, est_latency_ms: latency, est_cost: cost };
+
+  return {
+    est_reliability: reliability,
+    est_latency_ms: latency,
+    est_cost: cost,
+    est_privacy_score: privacyScore,
+    est_delivery_probability: deliveryProb,
+  };
 }
 
 export function createRouter(defaultPolicy: RoutingPolicy) {
@@ -365,11 +619,13 @@ export function createRouter(defaultPolicy: RoutingPolicy) {
 
     let best: { hops: RouteHop[]; rank: number; eval: ReturnType<typeof evaluatePlan> } | null = null;
     for (const hops of candidates) {
-      const ev = evaluatePlan(hops);
-      const rank = rankRoute({ ...ev, hops }, ctx.intent, policy);
+      // P9: populate each hop with computed metrics from peer resource reports.
+      const populatedHops = populatePlanMetrics(hops, ctx);
+      const ev = evaluatePlan(populatedHops, ctx);
+      const rank = rankRoute({ ...ev, hops: populatedHops }, ctx.intent, policy);
       if (rank === null) continue;
       if (!best || rank > best.rank) {
-        best = { hops, rank, eval: ev };
+        best = { hops: populatedHops, rank, eval: ev };
       }
     }
 
@@ -383,7 +639,7 @@ export function createRouter(defaultPolicy: RoutingPolicy) {
     const plan: RoutePlan = {
       bundle_id: '', // filled by caller; the router doesn't mint ids
       hops: best.hops,
-      rationale: `Chose plan of ${best.hops.length} hop(s); reliability=${best.eval.est_reliability.toFixed(2)} latency=${best.eval.est_latency_ms}ms cost=${best.eval.est_cost}`,
+      rationale: `Chose plan of ${best.hops.length} hop(s); reliability=${(best.eval.est_reliability * 100).toFixed(1)}% delivery_prob=${(best.eval.est_delivery_probability * 100).toFixed(1)}% latency=${best.eval.est_latency_ms}ms cost=${best.eval.est_cost} privacy=${best.eval.est_privacy_score.toFixed(2)}`,
       est_reliability: best.eval.est_reliability,
       est_latency_ms: best.eval.est_latency_ms,
       est_cost: best.eval.est_cost,

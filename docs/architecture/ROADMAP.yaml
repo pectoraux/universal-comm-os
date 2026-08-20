@@ -103,7 +103,7 @@ phases:
 
   - id: P9
     name: Intelligent Routing
-    status: PENDING
+    status: DONE
     items:
       - weighted_routing
       - delivery_probability_estimation

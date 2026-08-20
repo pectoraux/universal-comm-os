@@ -370,7 +370,7 @@ function Header() {
           </div>
         </div>
         <Badge variant="outline" className="border-emerald-500 text-emerald-400">
-          P0 · P1 · P2 · P3 · P5 · P6 · P10 live
+          P0 · P1 · P2 · P3 · P5 · P6 · P9 · P10 live
         </Badge>
       </div>
     </header>
@@ -1250,7 +1250,7 @@ function RoadmapCard() {
     { id: 'P6', name: 'Internet Gateway', status: 'DONE' },
     { id: 'P7', name: 'Matrix Fabric', status: 'PENDING' },
     { id: 'P8', name: 'External Channels', status: 'PENDING' },
-    { id: 'P9', name: 'Intelligent Routing', status: 'PENDING' },
+    { id: 'P9', name: 'Intelligent Routing', status: 'DONE' },
     { id: 'P10', name: 'Universal Identity Graph', status: 'DONE' },
     { id: 'P11', name: 'Consumer Application', status: 'PENDING' },
     { id: 'P12', name: 'Business Platform', status: 'PENDING' },
@@ -1327,7 +1327,7 @@ function Footer({ onReset }: { onReset: () => void }) {
     <footer className="mt-auto border-t border-slate-800 bg-slate-900/50">
       <div className="container mx-auto px-4 py-3 flex items-center justify-between">
         <div className="text-[10px] text-slate-500 font-mono">
-          bundle → transport → destination (no Internet required) · ARCH-001..034 · tested in CI
+          bundle → transport → destination (no Internet required) · ARCH-001..037 · tested in CI
         </div>
         <Button size="sm" variant="outline" onClick={onReset} className="border-slate-700 text-slate-400 hover:bg-slate-800 text-xs">
           Reset Network

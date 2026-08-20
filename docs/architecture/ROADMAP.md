@@ -72,9 +72,13 @@ Implementation sequencing per the master prompt. Vertical from the protocol outw
 - [ ] RCS, Telegram, Instagram, Messenger (later)
 - Adapters are added AFTER the adapter abstraction is stable.
 
-## P9 — Intelligent Routing
-- [ ] Cost / latency / reliability / battery / bandwidth / storage / trust / privacy routing weights
-- [ ] Delivery probability estimation
+## P9 — Intelligent Routing  (DONE in this iteration)
+- [x] `computeHopMetrics()` derives reliability/latency/cost/privacy/delivery_probability from peer's resource report (battery, bandwidth, storage, compute) + verification state + intent constraints
+- [x] Router's `rankRoute` updated to weigh all factors: reliability + delivery_probability (primary), latency (secondary), cost (tertiary), privacy_score (quaternary), priority adjustments (EMERGENCY double-counts reliability, BULK inverts cost)
+- [x] Fixed the P3-P8 peerCaps bug: each immediate peer's ACTUAL caps are now looked up from the capability cache (was using the local node's caps for all peers — ARCH-037)
+- [x] `evaluatePlan` aggregates per-hop metrics into plan-level estimates; route plan rationale now shows `reliability=X% delivery_prob=Y% latency=Zms cost=C privacy=P`
+- [x] Privacy constraint enforcement: STRICT/FORWARD_SECRECY intents penalize UNVERIFIED peers heavily
+- [x] Tests proving: TRUSTED > UNVERIFIED, low battery penalizes, low storage penalizes RELAY hops, high bandwidth → low latency, EMERGENCY reduces cost, STRICT privacy penalizes UNVERIFIED, router picks better peer, NO_ROUTE when min_reliability can't be met
 
 ## P10 — Universal Identity Graph  (DONE in this iteration)
 - [x] Identity linking protocol: `linkChannelIdentity()` requires a signed `CHANNEL_OWNERSHIP` proof; the verifier checks the signature against the identity's signing pubkey

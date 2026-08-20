@@ -27,7 +27,7 @@ import type { Transport } from '@/core/transport/Transport';
 import type { TransportEventSink } from '@/core/transport/TransportEvent';
 import type { DeliveryTracker } from '@/core/delivery/DeliveryTracker';
 import type { RoutingPolicy } from '@/core/policy/types';
-import type { RoutePlan, RouteHop } from '@/core/routing/types';
+import type { RoutePlan, RouteHop, PeerCapabilities } from '@/core/routing/types';
 import type { Proof } from '@/core/bundle/types';
 import type { GatewayRuntime } from '@/gateway/GatewayRuntime';
 import type { CapabilityCache, CapabilityAdvertisement } from '@/core/capabilities/CapabilityCache';
@@ -333,13 +333,7 @@ export function createNodeRuntime(deps: NodeRuntimeDeps): NodeRuntime {
     const candidatePeerIds = peers.filter((n) => n !== from_node_id);
     if (candidatePeerIds.length === 0) return false;
 
-    const peerCaps = candidatePeerIds.map((node_id) => ({
-      node_id,
-      transport: deps.transports.filter((t) => t.isAvailable()).map((t) => t.transport_type),
-      relay: deps.capabilities.relay.size > 0 ? (['STORE', 'FORWARD'] as Array<'STORE' | 'FORWARD'>) : ([] as Array<'STORE' | 'FORWARD'>),
-      gateway: Array.from(deps.capabilities.gateway),
-      verification: deps.capabilities.verification,
-    }));
+    const peerCaps = buildPeerCaps(candidatePeerIds, deps.capabilityCache, deps.transports, deps.capabilities);
 
     const decision = route(
       {
@@ -435,13 +429,7 @@ export function createNodeRuntime(deps: NodeRuntimeDeps): NodeRuntime {
     tracker.init(input.bundle.bundle_id);
 
     const peers = await listReachablePeers();
-    const peerCaps = peers.map((node_id) => ({
-      node_id,
-      transport: deps.transports.filter((t) => t.isAvailable()).map((t) => t.transport_type),
-      relay: deps.capabilities.relay.size > 0 ? (['STORE', 'FORWARD'] as Array<'STORE' | 'FORWARD'>) : ([] as Array<'STORE' | 'FORWARD'>),
-      gateway: Array.from(deps.capabilities.gateway),
-      verification: deps.capabilities.verification,
-    }));
+    const peerCaps = buildPeerCaps(peers, deps.capabilityCache, deps.transports, deps.capabilities);
 
     const decision = route(
       {
@@ -620,6 +608,12 @@ function buildKnownNetwork(
       transport: Array.from(c.transport) as any,
       relay: Array.from(c.relay) as any,
       gateway: Array.from(c.gateway) as any,
+      resource: {
+        bandwidth_bps: c.resource.bandwidth_bps,
+        battery_pct: c.resource.battery_pct,
+        storage_bytes: c.resource.storage_bytes,
+        compute_units: c.resource.compute_units,
+      },
       verification: c.verification,
     });
   }
@@ -628,6 +622,54 @@ function buildKnownNetwork(
     map.set(peer.node_id, peer);
   }
   return map;
+}
+
+/**
+ * P9: build peerCaps for IMMEDIATE peers using the capability cache.
+ *
+ * Previously (P3-P8 bug): peerCaps used the LOCAL node's caps for ALL peers.
+ * This was wrong — each peer has its own caps. P9 fixes this by looking up
+ * each peer's actual caps in the capability cache.
+ *
+ * If the cache doesn't have an entry for a peer (cold start, gossip not yet
+ * propagated), fall back to a minimal PeerCapabilities with the local node's
+ * transport types as a best-effort guess.
+ */
+function buildPeerCaps(
+  peerNodeIds: string[],
+  cache: CapabilityCache | undefined,
+  localTransports: Transport[],
+  localCapabilities: NodeCapabilities,
+): PeerCapabilities[] {
+  return peerNodeIds.map((node_id) => {
+    if (cache) {
+      const ad = cache.get(node_id);
+      if (ad) {
+        const c = ad.capabilities;
+        return {
+          node_id,
+          transport: Array.from(c.transport) as any,
+          relay: Array.from(c.relay) as any,
+          gateway: Array.from(c.gateway) as any,
+          resource: {
+            bandwidth_bps: c.resource.bandwidth_bps,
+            battery_pct: c.resource.battery_pct,
+            storage_bytes: c.resource.storage_bytes,
+            compute_units: c.resource.compute_units,
+          },
+          verification: c.verification,
+        };
+      }
+    }
+    // Fallback: minimal caps (cold start).
+    return {
+      node_id,
+      transport: localTransports.filter((t) => t.isAvailable()).map((t) => t.transport_type),
+      relay: localCapabilities.relay.size > 0 ? (['STORE', 'FORWARD'] as Array<'STORE' | 'FORWARD'>) : ([] as Array<'STORE' | 'FORWARD'>),
+      gateway: Array.from(localCapabilities.gateway),
+      verification: localCapabilities.verification,
+    };
+  });
 }
 
 export type { UniversalIdentity, UniversalIdentityRef, Proof, CommunicationBundle };

@@ -73,9 +73,16 @@ export interface PeerCapabilities {
   transport: TransportCapabilityType[];
   relay: ('STORE' | 'FORWARD')[];
   gateway: GatewayCapabilityType[];
+  /**
+   * P9: peer's resource report. Used by computeHopMetrics() to derive
+   * dynamic reliability/latency/cost estimates (battery, bandwidth, storage,
+   * compute). When absent, the router falls back to static defaults.
+   */
   resource?: {
     bandwidth_bps?: number;
     battery_pct?: number;
+    storage_bytes?: number;
+    compute_units?: number;
   };
   verification: 'UNVERIFIED' | 'PEER_CORROBORATED' | 'TRUSTED';
 }
