@@ -34,6 +34,7 @@ import {
   createIdentityGraph,
   signChannelOwnershipProof,
   verifyChannelOwnershipProof,
+  LinkStateError,
   type UniversalIdentity,
   type CommunicationBundle,
 } from '@/core/index';
@@ -56,7 +57,7 @@ describe('P10 — Universal Identity Graph', () => {
     graph = createIdentityGraph();
   });
 
-  it('links an identity to a channel via a signed proof', () => {
+  it('links an identity to a channel via a signed proof (S0.2.2: ASSERTED state)', () => {
     const proof = signChannelOwnershipProof({
       identity_id: bobId.id,
       channel: 'EMAIL',
@@ -67,7 +68,10 @@ describe('P10 — Universal Identity Graph', () => {
     expect(graph.link({ identity: bobId, channel: 'EMAIL', channel_id: 'bob@example.com', proof })).toBe(true);
     expect(graph.size()).toBe(1);
     expect(graph.snapshot()[0].identity_ref.id).toBe(bobId.id);
-    expect(graph.snapshot()[0].verification).toBe('VERIFIED');
+    // S0.2.2 (ARCH-049): a freshly-linked channel is ASSERTED, not VERIFIED.
+    // The signed proof attests an ASSERTION; the channel owner has not yet
+    // completed the in-band challenge-response that would transition to VERIFIED.
+    expect(graph.snapshot()[0].verification).toBe('ASSERTED');
   });
 
   it('rejects a link with an invalid signature (proof of forgery)', () => {
@@ -105,6 +109,11 @@ describe('P10 — Universal Identity Graph', () => {
       signing_pubkey: bobKp.key_set.signing_pubkey,
     });
     graph.link({ identity: bobId, channel: 'EMAIL', channel_id: 'bob@example.com', proof });
+    // S0.2.2 (ARCH-049): the link is ASSERTED. Transition through the
+    // canonical state machine to VERIFIED before resolution will succeed.
+    // The challenge hash check is skipped (in-memory test path) — the DB
+    // would have done the canonical challenge check in production.
+    graph.verifyChannel({ channel: 'EMAIL', channel_id: 'bob@example.com' });
 
     const resolved = graph.resolveChannelRecipient('EMAIL', 'bob@example.com');
     expect(resolved).toBeDefined();
@@ -117,7 +126,7 @@ describe('P10 — Universal Identity Graph', () => {
     expect(graph.resolveChannelRecipient('EMAIL', 'nobody@example.com')).toBeUndefined();
   });
 
-  it('revokes a link', () => {
+  it('revokes a link (S0.2.2: VERIFIED→REVOKED, link RETAINED, not deleted)', () => {
     const proof = signChannelOwnershipProof({
       identity_id: bobId.id,
       channel: 'EMAIL',
@@ -127,8 +136,20 @@ describe('P10 — Universal Identity Graph', () => {
     });
     graph.link({ identity: bobId, channel: 'EMAIL', channel_id: 'bob@example.com', proof });
     expect(graph.size()).toBe(1);
+    // S0.2.2 (ARCH-049): the link is ASSERTED. Revoke is illegal from
+    // ASSERTED — the link must be VERIFIED first. The canonical state
+    // machine throws LinkStateError for this illegal transition.
+    expect(() => graph.revoke('EMAIL', 'bob@example.com')).toThrow(LinkStateError);
+    expect(graph.size()).toBe(1); // link retained, no transition
+    // Now transition ASSERTED → VERIFIED via the canonical path.
+    graph.verifyChannel({ channel: 'EMAIL', channel_id: 'bob@example.com' });
+    expect(graph.snapshot()[0].verification).toBe('VERIFIED');
+    // Revoke is now legal: VERIFIED → REVOKED.
     expect(graph.revoke('EMAIL', 'bob@example.com')).toBe(true);
-    expect(graph.size()).toBe(0);
+    // S0.2.2 (Article XIV §6): the link is RETAINED (for forensics), not deleted.
+    expect(graph.size()).toBe(1);
+    expect(graph.snapshot()[0].verification).toBe('REVOKED');
+    // A REVOKED link is invisible to resolveChannelRecipient (Article XIV §2).
     expect(graph.resolveChannelRecipient('EMAIL', 'bob@example.com')).toBeUndefined();
   });
 
@@ -188,7 +209,9 @@ describe('P10 — End-to-end: channel recipient resolved via IdentityGraph', () 
 
     graph = createIdentityGraph();
 
-    // Pre-link Bob's email to his identity via a signed proof.
+    // Pre-link Bob's email to his identity via a signed proof, then transition
+    // through the canonical state machine to VERIFIED so resolveChannelRecipient
+    // succeeds (Article XIV §2 — only VERIFIED links resolve).
     const bobProof = signChannelOwnershipProof({
       identity_id: bobId.id,
       channel: 'EMAIL',
@@ -197,6 +220,7 @@ describe('P10 — End-to-end: channel recipient resolved via IdentityGraph', () 
       signing_pubkey: bobKp.key_set.signing_pubkey,
     });
     graph.link({ identity: bobId, channel: 'EMAIL', channel_id: 'bob@example.com', proof: bobProof });
+    graph.verifyChannel({ channel: 'EMAIL', channel_id: 'bob@example.com' });
 
     aliceRT = createNodeRuntime({
       identity: aliceId,

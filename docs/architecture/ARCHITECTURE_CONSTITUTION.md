@@ -132,3 +132,19 @@ An authorization state and a resource state must never be inferred from each oth
 6. State transitions: `ASSERTED → VERIFIED` (challenge verified), `ASSERTED → EXPIRED` (TTL elapsed), `VERIFIED → REVOKED` (explicit revocation).
 7. Dispatch MUST reject `ASSERTED` and `REVOKED` channel identities. Only `VERIFIED` can resolve the recipient's encryption pubkey.
 8. All communication resources (IdentityGraph, transcripts, capability caches, delivery state) are partitioned by organization. Cross-org access is FORBIDDEN.
+
+## Article XV — IdentityLink State Machine is Canonical (S0.2.2)
+
+The IdentityLink state machine defined in `src/core/identity/IdentityLinkStateMachine.ts` is the canonical source of truth for every link state transition. No code path — in-memory `IdentityGraph`, persisted `ChannelVerificationChallenge`, server action, or adapter — is permitted to write a `link_state` value without first consulting the canonical state machine.
+
+1. **States** (matching Article XIV §6): `ASSERTED`, `VERIFIED`, `EXPIRED`, `REVOKED`.
+2. **Legal transitions** (and ONLY these):
+   - `ASSERTED → VERIFIED` (event `VERIFY`)
+   - `ASSERTED → EXPIRED` (event `EXPIRE`)
+   - `VERIFIED → REVOKED` (event `REVOKE`)
+3. **All other transitions are forbidden** and MUST throw `LinkStateError`. Terminal states (`EXPIRED`, `REVOKED`) accept no events. `ASSERTED` accepts only `VERIFY` and `EXPIRE`. `VERIFIED` accepts only `REVOKE`. The `ASSERT` event exists only to set the initial state on a brand-new link; it is NOT a transition from an existing state.
+4. **The canonical state machine is pure.** It performs no I/O, no DB writes, no in-memory mutation, no cryptographic verification. Its only job is: "given (current_state, event), is the transition legal? If yes, return the new state; if no, throw." Side-effects (DB writes, in-memory cache updates, audit events) are the caller's responsibility — but the caller MUST call `transition()` first.
+5. **The in-memory IdentityGraph is a CACHE of the DB state** (per Article XIV §3 — "Verification state is persisted in the database, not in-memory"). The DB is canonical. Production code MUST update the DB first via `verifyChannelChallenge()` / `revokeChannelLink()`; only on DB success does the caller mirror the transition to the in-memory graph via `IdentityGraph.verifyChannel()` / `expireChannel()` / `revoke()`.
+6. **The `revoke()` method on `IdentityGraph` MUST NOT delete the link.** A `REVOKED` link is retained for forensic audit trail. The link's `last_transition_at` and `last_event` fields are updated to record the transition.
+7. **The `link()` method on `IdentityGraph` MUST produce a link in `ASSERTED` state**, not `VERIFIED`. A signed `CHANNEL_OWNERSHIP` proof attests an assertion (the identity claims ownership); it does NOT prove channel control. Advancing to `VERIFIED` requires the channel owner to complete an in-band challenge-response through the actual target channel.
+8. **Demo / test bootstrap MAY use a fast-path** (`linkIdentityToChannelVerifiedForDemo()` on `CommOS`) that asserts AND verifies in a single call. The transition still goes through the canonical state machine (`ASSERT` then `VERIFY`). The fast-path MUST be clearly named and gated so production callers cannot accidentally use it.

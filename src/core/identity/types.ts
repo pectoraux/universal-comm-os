@@ -20,10 +20,46 @@ export type ChannelType =
   | 'DESKTOP'
   | 'UNKNOWN';
 
+/**
+ * Canonical IdentityLink verification state (Article XIV §1-6, ARCH-049).
+ *
+ * Lifecycle:
+ *   ASSERTED  — link created via a signed CHANNEL_OWNERSHIP proof; the channel
+ *               owner has NOT yet proven possession of the channel_id.
+ *   VERIFIED  — the channel owner completed an in-band challenge-response
+ *               proving they actually control the channel_id.
+ *   EXPIRED   — the ASSERTED challenge's TTL elapsed before verification.
+ *   REVOKED   — a previously-VERIFIED link has been administratively or
+ *               owner-initiated revoked. The link is retained for forensics.
+ *
+ * State transitions (canonical, enforced by `IdentityLinkStateMachine`):
+ *   ASSERTED → VERIFIED     (event VERIFY, requires challenge match)
+ *   ASSERTED → EXPIRED      (event EXPIRE, TTL elapsed)
+ *   VERIFIED → REVOKED      (event REVOKE)
+ *
+ * ALL OTHER TRANSITIONS ARE FORBIDDEN AND MUST THROW `LinkStateError`.
+ *
+ * S0.2.2 — the previous `'UNVERIFIED'` state is removed. It conflated
+ * "no proof has been provided yet" with "an assertion has been made but not
+ * verified." Article XIV separates these: the assertion (ASSERTED) is the
+ * starting state, and it can only advance to VERIFIED or EXPIRED — never
+ * regress to UNVERIFIED.
+ */
 export type VerificationState =
-  | 'UNVERIFIED'
+  | 'ASSERTED'
   | 'VERIFIED'
+  | 'EXPIRED'
   | 'REVOKED';
+
+/**
+ * Events that drive the canonical IdentityLink state machine.
+ * Each event corresponds to a legal transition (see ARCH-049 transition table).
+ */
+export type IdentityLinkEvent =
+  | 'ASSERT'   // create a new link (initial state ASSERTED)
+  | 'VERIFY'   // ASSERTED → VERIFIED (challenge-response succeeded)
+  | 'EXPIRE'   // ASSERTED → EXPIRED  (TTL elapsed without verification)
+  | 'REVOKE';  // VERIFIED → REVOKED   (administrative or owner-initiated)
 
 /**
  * A reference to a UniversalIdentity that is safe to put inside an envelope

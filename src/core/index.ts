@@ -19,6 +19,7 @@ export * from './identity/UniversalIdentity';
 export * from './identity/ChannelIdentity';
 export * from './identity/keys';
 export * from './identity/IdentityGraph';
+export * from './identity/IdentityLinkStateMachine'; // S0.2.2 — canonical state machine (ARCH-049)
 
 // Intent
 export * from './intent/types';

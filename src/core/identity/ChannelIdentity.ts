@@ -17,7 +17,7 @@ export function createChannelIdentity(
   return {
     channel: input.channel,
     channel_id: input.channel_id,
-    verified: input.verified ?? 'UNVERIFIED',
+    verified: input.verified ?? 'ASSERTED',
     linked_at: Date.now(),
     proof: input.proof,
   };

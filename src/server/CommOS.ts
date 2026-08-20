@@ -209,9 +209,13 @@ class SimulatedNetwork {
 
   /**
    * P10: link a UniversalIdentity to a channel_id via a signed proof.
-   * Called from setup() to pre-link demo nodes; in production this would
-   * be called by the user's client after they complete a channel-ownership
-   * challenge (e.g., clicking a verification link in their email).
+   * S0.2.2 (ARCH-049): the link is created in `ASSERTED` state. The caller
+   * (production) MUST then complete an in-band challenge-response and call
+   * `verifyChannelLink()` to transition to `VERIFIED`.
+   *
+   * For demo/test bootstrap where the channel-ownership is pre-trusted, use
+   * `linkIdentityToChannelVerifiedForDemo()` — it asserts AND verifies in
+   * a single call, going through the canonical state machine.
    */
   linkIdentityToChannel(
     identity: UniversalIdentity,
@@ -227,6 +231,53 @@ class SimulatedNetwork {
       signing_pubkey: keypair.key_set.signing_pubkey,
     });
     return this.identityGraph.link({ identity, channel, channel_id, proof });
+  }
+
+  /**
+   * S0.2.2 (ARCH-049, ARCH-050) — DEMO/TEST bootstrap only.
+   *
+   * Asserts the link AND transitions it through the canonical state machine
+   * to VERIFIED in a single call. The DB-side challenge check is skipped
+   * (the in-memory graph never had a challenge hash attached). This is the
+   * ONLY non-canonical path; it is gated by the "Demo" name and the explicit
+   * comment so production callers do not invoke it.
+   *
+   * In production:
+   *   1. linkIdentityToChannel()         → ASSERTED (in-memory + DB)
+   *   2. createChannelChallenge()        → challenge code generated + delivered via channel
+   *   3. verifyChannelAction(code)       → DB verifies hash, updates link_state to VERIFIED
+   *   4. (this method is called after DB success) verifyChannelLink()
+   *                                       → in-memory graph transitions to VERIFIED
+   */
+  linkIdentityToChannelVerifiedForDemo(
+    identity: UniversalIdentity,
+    keypair: { signing_secret_key: Uint8Array; key_set: { signing_pubkey: Uint8Array; encryption_pubkey: Uint8Array } },
+    channel: 'EMAIL' | 'SMS' | 'WHATSAPP' | 'MATRIX' | 'TELEGRAM' | 'INSTAGRAM' | 'MESSENGER' | 'RCS',
+    channel_id: string,
+  ): boolean {
+    const linked = this.linkIdentityToChannel(identity, keypair, channel, channel_id);
+    if (!linked) return false;
+    // Transition the in-memory cache through the canonical state machine.
+    // The DB-side challenge check is bypassed — DEMO ONLY.
+    return this.identityGraph.verifyChannel({ channel, channel_id });
+  }
+
+  /**
+   * S0.2.2 (ARCH-049, ARCH-050) — production path for transitioning an
+   * ASSERTED link to VERIFIED after the DB-side challenge has been
+   * verified. Called by `verifyChannelAction` in `actions/commos.ts`
+   * AFTER `verifyChannelChallenge()` (in `authorization.ts`) returns
+   * `{ verified: true }`.
+   *
+   * Returns false if the in-memory link doesn't exist (e.g., cold start —
+   * the in-memory graph hasn't loaded the link from DB yet) — the caller
+   * SHOULD treat this as a cache-miss and reload the link from DB.
+   */
+  verifyChannelLink(
+    channel: 'EMAIL' | 'SMS' | 'WHATSAPP' | 'MATRIX' | 'TELEGRAM' | 'INSTAGRAM' | 'MESSENGER' | 'RCS',
+    channel_id: string,
+  ): boolean {
+    return this.identityGraph.verifyChannel({ channel, channel_id });
   }
 
   /** P10: snapshot of the identity graph (for UI). */
@@ -592,14 +643,17 @@ class SimulatedNetwork {
     this.identities.set('relay', { identity: relayId, signing_sk: relayKp.signing_secret_key, encryption_sk: relayKp.encryption_secret_key });
     this.identities.set('gateway', { identity: gatewayId, signing_sk: gatewayKp.signing_secret_key, encryption_sk: gatewayKp.encryption_secret_key });
 
-    // P10: pre-link each demo node's email to their UniversalIdentity via a
-    // signed CHANNEL_OWNERSHIP proof. In production, this would happen via
-    // the user's email client signing a challenge; in the demo, the runtime
-    // has the signing key so it signs directly.
-    this.linkIdentityToChannel(aliceId, aliceKp, 'EMAIL', 'alice@example.com');
-    this.linkIdentityToChannel(bobId, bobKp, 'EMAIL', 'bob@example.com');
-    this.linkIdentityToChannel(relayId, relayKp, 'EMAIL', 'relay@example.com');
-    this.linkIdentityToChannel(gatewayId, gatewayKp, 'EMAIL', 'gateway@example.com');
+    // P10/S0.2.2: pre-link each demo node's email to their UniversalIdentity
+    // via a signed CHANNEL_OWNERSHIP proof. The link is ASSERTED first, then
+    // transitioned through the canonical state machine to VERIFIED via
+    // `linkIdentityToChannelVerifiedForDemo()` — this is the DEMO fast-path
+    // that bypasses the in-band challenge (the demo has no real channel to
+    // deliver a challenge through). Production code MUST use the canonical
+    // path: linkIdentityToChannel() → createChannelChallenge() → verifyChannelAction().
+    this.linkIdentityToChannelVerifiedForDemo(aliceId, aliceKp, 'EMAIL', 'alice@example.com');
+    this.linkIdentityToChannelVerifiedForDemo(bobId, bobKp, 'EMAIL', 'bob@example.com');
+    this.linkIdentityToChannelVerifiedForDemo(relayId, relayKp, 'EMAIL', 'relay@example.com');
+    this.linkIdentityToChannelVerifiedForDemo(gatewayId, gatewayKp, 'EMAIL', 'gateway@example.com');
 
     const aliceCaps = advertiseCapabilities({
       node_id: 'alice',

@@ -223,7 +223,7 @@ export async function linkIdentityToChannelAction(input: {
   });
 }
 
-// ─── S0.2.1-4/9: verifyChannelAction updates IdentityGraph ───────────
+// ─── S0.2.1/4/9: verifyChannelAction updates DB + in-memory IdentityGraph ───
 
 export async function verifyChannelAction(input: {
   node_id: string;
@@ -234,12 +234,29 @@ export async function verifyChannelAction(input: {
   return withAuth(async (ctx) => {
     const { organizationId } = await authorizeNode(ctx, input.node_id, 'verifyChannel');
     return runSafe(ctx, 'verifyChannel', 'USER', async () => {
+      const net = getNetwork();
+      // S0.2.2 (ARCH-049, ARCH-050): canonical path — DB transition FIRST,
+      // then in-memory cache transition. The DB is canonical (Article XIV §3);
+      // the in-memory graph mirrors the DB. If DB transition fails, the
+      // in-memory graph is left unchanged.
       const result = await verifyChannelChallenge({
         nodeId: input.node_id,
         channel: input.channel,
         channelId: input.channel_id,
         challengeCode: input.challenge_code,
       });
+      // S0.2.2: if DB transitioned to VERIFIED, mirror it to the in-memory
+      // IdentityGraph. The in-memory verifyChannel() goes through the
+      // canonical state machine (IdentityLinkStateMachine.transition()).
+      if (result.verified) {
+        try {
+          net.verifyChannelLink(input.channel as any, input.channel_id);
+        } catch (e) {
+          // Cache miss / illegal state — log and continue. The DB is canonical,
+          // so the verification has succeeded from the user's perspective.
+          console.warn('[VERIFY_CHANNEL] In-memory graph sync failed', String(e));
+        }
+      }
       return result;
     }, organizationId);
   });
