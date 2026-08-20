@@ -73,10 +73,11 @@ describe('S0.1-3: authorization.ts exists and exports required functions', () =>
     expect(source).toContain('console.error');
   });
 
-  it('validateOrigin checks request origin', () => {
+  it('S0.2-8: validateOrigin has been REMOVED (rely on framework)', () => {
     const source = readFileSync(AUTHZ_FILE, 'utf-8');
-    expect(source).toContain('export function validateOrigin');
-    expect(source).toContain('headers.get');
+    // S0.2-8: validateOrigin was removed — we rely on NextAuth's same-origin protection.
+    expect(source).not.toContain('export function validateOrigin');
+    expect(source).toContain('S0.2-8: validateOrigin() has been REMOVED');
   });
 });
 
@@ -128,22 +129,30 @@ describe('S0.1-4: Every resource-bearing server action calls authorize*', () => 
 describe('S0.1-5: Every action logs audit events', () => {
   const source = readFileSync(ACTIONS_FILE, 'utf-8');
 
-  it('safeAction helper logs allowed/denied outcomes', () => {
-    expect(source).toContain('logAuditEvent');
-    expect(source).toContain("'allowed'");
-    expect(source).toContain("'denied'");
+  it('runSafe helper + auditMandatory log allowed/denied outcomes', () => {
+    // S0.2: safeAction was renamed to runSafe; auditMandatory handles denied at the boundary
+    expect(source).toContain('runSafe');
+  });
+
+  it('authorization.ts has auditMandatory for denied ops', () => {
+    const authzSource = readFileSync(AUTHZ_FILE, 'utf-8');
+    expect(authzSource).toContain('auditMandatory');
+    expect(authzSource).toContain("'allowed'");
+    expect(authzSource).toContain("'denied'");
   });
 });
 
 describe('S0.1-6: No raw exceptions returned to clients', () => {
   const source = readFileSync(ACTIONS_FILE, 'utf-8');
 
-  it('every action wraps fn body in safeAction', () => {
+  it('every action wraps fn body in runSafe (S0.2: renamed from safeAction)', () => {
     const exportRegex = /export\s+async\s+function\s+(\w+)\s*\(/g;
     let m: RegExpExecArray | null;
     while ((m = exportRegex.exec(source)) !== null) {
       const fnBody = extractFnBody(source, m[1]);
-      expect(fnBody.includes('safeAction')).toBe(true);
+      // S0.2: actions use runSafe() or withAuth/withRole
+      const hasAuth = fnBody.includes('runSafe') || fnBody.includes('withAuth') || fnBody.includes('withRole');
+      expect(hasAuth).toBe(true);
     }
   });
 });

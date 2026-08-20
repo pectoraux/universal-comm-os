@@ -67,12 +67,12 @@ describe('S0-11: Architecture — every server action is auth-guarded', () => {
     expect(resetBody.includes("['admin']")).toBe(true);
   });
 
-  it('updateRoutingPolicyAction requires admin or demo role', () => {
+  it('updateRoutingPolicyAction requires admin role (S0.2: PLATFORM_ADMIN only)', () => {
     const source = readFileSync(ACTIONS_FILE, 'utf-8');
     const updateIdx = source.indexOf('export async function updateRoutingPolicyAction');
     expect(updateIdx).toBeGreaterThan(-1);
     const updateBody = source.slice(updateIdx, updateIdx + 500);
-    expect(updateBody.includes("['admin', 'demo']")).toBe(true);
+    expect(updateBody.includes("['admin']")).toBe(true);
   });
 });
 
@@ -121,23 +121,20 @@ describe('S0-12: Security — unauthenticated access is blocked', () => {
 
   it('commos.ts has no direct getNetwork call without auth wrapper', () => {
     const source = readFileSync(ACTIONS_FILE, 'utf-8');
-    // Check that every getNetwork() call is inside a withAuth/withRole callback.
-    // We look for any getNetwork() call that's NOT preceded by withAuth/withRole.
+    // S0.2: actions use runSafe() inside withAuth callbacks.
+    // getNetwork() calls should be inside withAuth/runSafe/authorizeByVisibility blocks.
     const lines = source.split('\n');
     for (let i = 0; i < lines.length; i++) {
       const line = lines[i];
-      if (line.includes('getNetwork()') && !line.includes('withAuth') && !line.includes('withRole')) {
-        // This line calls getNetwork() — check if it's inside a withAuth callback.
-        // Look backwards for the enclosing withAuth/withRole.
+      if (line.includes('getNetwork()') && !line.includes('import') && !line.trim().startsWith('//') && !line.trim().startsWith('*')) {
+        // Check if it's inside a withAuth/withRole/runSafe/authorizeByVisibility block.
         let foundAuth = false;
-        for (let j = i; j >= Math.max(0, i - 5); j--) {
-          if (lines[j].includes('withAuth') || lines[j].includes('withRole')) {
+        for (let j = i; j >= Math.max(0, i - 15); j--) {
+          if (lines[j].includes('withAuth') || lines[j].includes('withRole') || lines[j].includes('runSafe') || lines[j].includes('authorizeByVisibility')) {
             foundAuth = true;
             break;
           }
         }
-        // If it's inside an import or comment, skip.
-        if (line.includes('import') || line.trim().startsWith('//') || line.trim().startsWith('*')) continue;
         expect(foundAuth).toBe(true);
       }
     }

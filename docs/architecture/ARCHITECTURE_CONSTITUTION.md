@@ -96,3 +96,26 @@ Authentication answers "who are you?" Authorization answers "what are you allowe
 6. Every authorized operation MUST be logged to an AuditEvent table with: actor identity, action, resource_id, timestamp, outcome (allowed/denied).
 7. Raw internal exceptions MUST NOT be returned to clients. All error responses use a safe structured format.
 8. Request origin MUST be validated at the web/API boundary to prevent cross-origin attacks.
+
+## Article XIII — Separate Authorization Dimensions (S0.2)
+
+A resource's existence, ownership, membership, visibility, and channel verification are separate authorization dimensions. Authentication of the caller does not establish any of them.
+
+1. **Resource Visibility Classes**: Every resource is classified as one of:
+   - `PUBLIC` — network topology, node capabilities (visible to any authenticated user)
+   - `ORGANIZATION` — transcripts, identity graph, capability caches (visible to org members)
+   - `USER` — inboxes, decryption results, conversation content (visible to the owning user)
+   - `PLATFORM` — analytics, community stats, routing policy (visible to platform admins)
+2. **Role Hierarchy** (distinct from system role):
+   - `PLATFORM_ADMIN` — can access any resource across all organizations
+   - `ORG_OWNER` — can manage org members + access all org resources
+   - `ORG_ADMIN` — can manage org settings + access all org resources
+   - `ORG_MEMBER` — can access org resources they're explicitly authorized for
+   - `DEMO` — same as ORG_MEMBER but for demo accounts
+3. **Channel Verification States**: Identity links have distinct states:
+   - `ASSERTED` — an org admin claimed ownership, but the channel owner has not verified
+   - `VERIFIED` — the channel owner completed a challenge-response proving possession
+   - `REVOKED` — the link is no longer valid
+4. **ASSERTED identities MUST NOT be used for production delivery.** Only `VERIFIED` links can be used to resolve recipient encryption pubkeys for dispatch.
+5. **Denied operations MUST be audited.** The authorization boundary itself logs `AuditEvent(denied)` before returning FORBIDDEN. The audit system never depends on the protected operation running first.
+6. **Security audit persistence is mandatory for denied operations.** If the audit write fails for a denied operation, the operation is still denied, but a secondary alert/queue MUST capture the event.

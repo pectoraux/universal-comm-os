@@ -93,6 +93,22 @@ model AuditEvent {
   @@map("audit_events")
 }
 
+// S0.2: ChannelVerificationChallenge — for real channel-ownership verification.
+model ChannelVerificationChallenge {
+  id              String   @id @default(cuid())
+  node_id         String
+  channel         String   // EMAIL, SMS, WHATSAPP, etc.
+  channel_id      String   // e.g. bob@example.com
+  challenge_code  String   // OTP or verification code
+  status          String   @default("pending") // pending | verified | expired
+  created_at      DateTime @default(now())
+  expires_at      DateTime
+  verified_at     DateTime?
+
+  @@unique([node_id, channel, channel_id])
+  @@map("channel_verification_challenges")
+}
+
 model Account {
   id                String  @id @default(cuid())
   userId            String
