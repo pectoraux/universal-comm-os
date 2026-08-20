@@ -147,12 +147,21 @@ function planHopsForPeer(
     }
   }
 
-  // 4. Direct hop to a peer — opportunistic delivery.
+  // 4. P5: Multi-hop route via gossiped capability cache (BFS over known_network).
+  //    Runs BEFORE the opportunistic fallback so the latter's "no candidates"
+  //    check correctly accounts for multi-hop plans.
+  if (ctx.known_network && ctx.known_network.size > 0) {
+    const multiHopPlans = planMultiHopViaKnownNetwork(ctx, policy);
+    candidatePlans.push(...multiHopPlans);
+  }
+
+  // 5. Direct hop to a peer — opportunistic delivery.
   //    a) No specific destination: send to any reachable peer.
-  //    b) destChannel set but no peer advertised the matching gateway capability
-  //       (we may simply lack gossiped capability info — P5 territory).
-  //       Fall back to sending to the first reachable peer; the relay will
-  //       re-route on receipt per P3.5 multi-hop forwarding.
+  //    b) destChannel set but no multi-hop plan was found (cold start, gossip
+  //       not yet propagated, or no peer advertises the matching gateway
+  //       capability): fall back to sending to the first reachable peer; the
+  //       relay will re-route on receipt per P3.5 multi-hop forwarding OR
+  //       epidemic replication (ARCH-027).
   if (!destNodeId) {
     const opportunisticOk = !destChannel || candidatePlans.length === 0;
     if (opportunisticOk) {
@@ -175,6 +184,152 @@ function planHopsForPeer(
   }
 
   return candidatePlans;
+}
+
+/**
+ * P5: Multi-hop route planning via BFS over the gossiped known_network.
+ *
+ * For destNodeId: find a path from any immediate peer to the destNodeId,
+ * where each intermediate node has FORWARD relay capability and a transport
+ * to the next hop.
+ *
+ * For destChannel: find a path to any node that advertises the matching
+ * GATEWAY capability.
+ *
+ * Returns a list of candidate plans. Each plan is an array of hops where
+ * the first hop is a TRANSPORT to an immediate peer, and subsequent hops
+ * are RELAY hops (the relay will forward on receipt per P3.5).
+ *
+ * We DO NOT verify that intermediate peers can actually reach each other
+ * (no transport link verification). The gossiped capabilities tell us a
+ * node has a transport type, not which specific peers it can reach. The
+ * intermediate relay's tryForward will handle that at runtime.
+ *
+ * Reliability degrades geometrically per hop: 0.85^hop_count.
+ */
+function planMultiHopViaKnownNetwork(
+  ctx: RoutingContext,
+  policy: RoutingPolicy,
+): RouteHop[][] {
+  const plans: RouteHop[][] = [];
+  const destNodeId = ctx.destination?.node_id;
+  const destChannel = ctx.destination?.channel as GatewayCapabilityType | undefined;
+  if (!destNodeId && !destChannel) return plans;
+  if (!ctx.known_network) return plans;
+
+  // Build adjacency: node_id -> set of node_ids it can reach (via its gossiped transports).
+  // For simplicity, we assume any node with a transport can reach any other node
+  // with a transport (we don't have link-level topology from gossip, only
+  // capability advertisements). This is a conservative approximation; the
+  // first hop still MUST be an immediate peer (verified via ctx.known_peers).
+  const allNodes = Array.from(ctx.known_network.values());
+
+  // Target: the destNodeId, OR any node with the matching GATEWAY capability.
+  const isTarget = (nodeId: string): boolean => {
+    if (destNodeId) return nodeId === destNodeId;
+    return false;
+  };
+  const isGatewayTarget = (node: PeerCapabilities): boolean => {
+    if (!destChannel) return false;
+    return node.gateway.includes(destChannel) && isGatewayAllowed(policy, destChannel);
+  };
+
+  // BFS from each immediate peer.
+  for (const startPeer of ctx.known_peers) {
+    // BFS up to max_hops deep.
+    const maxHops = policy.max_hops;
+    const queue: Array<{ path: string[]; hopCount: number }> = [
+      { path: [startPeer.node_id], hopCount: 1 },
+    ];
+    const visited = new Set<string>([startPeer.node_id]);
+
+    while (queue.length > 0) {
+      const { path, hopCount } = queue.shift()!;
+      if (hopCount >= maxHops) continue;
+      const lastNodeId = path[path.length - 1];
+      const lastNode = ctx.known_network!.get(lastNodeId);
+      if (!lastNode) continue;
+
+      // Check if any node reachable from `lastNode` is a target.
+      // We approximate "reachable" as "any node in the known_network that
+      // isn't already in the path AND has a FORWARD relay capability."
+      for (const candidate of allNodes) {
+        if (visited.has(candidate.node_id)) continue;
+        if (path.includes(candidate.node_id)) continue;
+        // The candidate must have FORWARD relay capability to be a viable next hop.
+        // (Or it's the target itself, in which case it just needs to exist.)
+        const isTargetNode = isTarget(candidate.node_id) || isGatewayTarget(candidate);
+        if (!isTargetNode && !candidate.relay.includes('FORWARD')) continue;
+        // Check transport: candidate must have a transport that's policy-allowed.
+        const hasAllowedTransport = candidate.transport.some((t) => isTransportAllowed(policy, t));
+        if (!hasAllowedTransport) continue;
+
+        const newPath = [...path, candidate.node_id];
+        if (isTargetNode) {
+          // Found a target! Build a plan.
+          const hops: RouteHop[] = [];
+          // First hop: TRANSPORT from this node to startPeer.
+          const firstTransport = startPeer.transport.find((t) => isTransportAllowed(policy, t));
+          if (!firstTransport) continue;
+          hops.push({
+            kind: 'TRANSPORT',
+            to_node_id: startPeer.node_id,
+            transport: firstTransport,
+            est_reliability: 0.85,
+            est_latency_ms: 100,
+            est_cost: 1,
+          });
+          // Middle hops: RELAY through intermediate nodes.
+          for (let i = 1; i < newPath.length - 1; i++) {
+            const intermediateId = newPath[i];
+            const intermediate = ctx.known_network!.get(intermediateId);
+            if (!intermediate) break;
+            const intermediateTransport = intermediate.transport.find((t) => isTransportAllowed(policy, t));
+            hops.push({
+              kind: 'RELAY',
+              to_node_id: intermediateId,
+              transport: intermediateTransport,
+              est_reliability: 0.7,
+              est_latency_ms: 200,
+              est_cost: 2,
+            });
+          }
+          // Last hop: the target.
+          const lastTarget = candidate;
+          if (isGatewayTarget(lastTarget)) {
+            hops.push({
+              kind: 'GATEWAY',
+              to_node_id: lastTarget.node_id,
+              gateway: destChannel,
+              est_reliability: 0.85,
+              est_latency_ms: 500,
+              est_cost: 5,
+            });
+          } else {
+            // Direct identity recipient — final TRANSPORT hop.
+            const lastTransport = lastTarget.transport.find((t) => isTransportAllowed(policy, t));
+            hops.push({
+              kind: 'TRANSPORT',
+              to_node_id: lastTarget.node_id,
+              transport: lastTransport,
+              est_reliability: 0.9,
+              est_latency_ms: 100,
+              est_cost: 1,
+            });
+          }
+          plans.push(hops);
+          // Don't continue BFS past this target — we found a path.
+          continue;
+        }
+
+        // Not a target — keep BFS going.
+        visited.add(candidate.node_id);
+        queue.push({ path: newPath, hopCount: hopCount + 1 });
+      }
+    }
+  }
+
+  return plans;
 }
 
 function evaluatePlan(

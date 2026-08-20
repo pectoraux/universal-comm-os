@@ -59,6 +59,13 @@ export interface RoutingContext {
     channel_id?: string;
     identity_id?: string;
   };
+  /**
+   * P5: deep network cache (gossiped peer capabilities). When present, the
+   * router plans multi-hop routes proactively (e.g., A → B → C → D).
+   * When absent, the router falls back to single-hop + opportunistic routing.
+   * The map keys are node_ids; values are the gossiped NodeCapabilities.
+   */
+  known_network?: Map<string, PeerCapabilities>;
 }
 
 export interface PeerCapabilities {

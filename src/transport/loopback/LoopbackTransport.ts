@@ -94,6 +94,36 @@ export class LoopbackTransport implements Transport {
     this.receivers.add(handler);
   }
 
+  // ──────────────────────────────────────────────────────────────────────
+  // P5: Capability gossip side-channel (ARCH-031).
+  //
+  // The Transport interface in core/transport/Transport.ts is UNCHANGED.
+  // LoopbackTransport adds optional `gossip()` + `onGossip()` as a
+  // duck-typed side-channel. The NodeRuntime casts transports to access
+  // these — same pattern as `listReachablePeers` casts to access `peers`.
+  //
+  // Real edge transports (P4: Android BLE/Wi-Fi) MAY implement the same
+  // methods; if they don't, gossip simply doesn't propagate over them.
+  // ──────────────────────────────────────────────────────────────────────
+
+  private gossipReceivers = new Set<(ad: any, from_node_id: string) => void>();
+
+  /** Push a capability advertisement to all peers on this transport's bus. */
+  gossip(advertisement: any): boolean {
+    if (!this.up) return false;
+    return this.bus.deliverGossip(this, advertisement);
+  }
+
+  /** Register a handler invoked when a capability advertisement arrives. */
+  onGossip(handler: (ad: any, from_node_id: string) => void): void {
+    this.gossipReceivers.add(handler);
+  }
+
+  /** Internal hook called by LoopbackBus when a gossip message arrives. */
+  _ingestGossip(ad: any, from_node_id: string): void {
+    for (const h of this.gossipReceivers) h(ad, from_node_id);
+  }
+
   /** Internal hook called by LoopbackBus when a bundle arrives. */
   _ingest(bundle: CommunicationBundle, from_node_id: string): void {
     this.events.emit({
@@ -135,6 +165,20 @@ export class LoopbackBus {
     if (!dest) return false;
     dest._ingest(bundle, from.node_id);
     return true;
+  }
+
+  /**
+   * P5: Deliver a capability advertisement to ALL peers on this bus
+   * (except the sender). Gossip is broadcast, not point-to-point.
+   */
+  deliverGossip(from: LoopbackTransport, advertisement: any): boolean {
+    let delivered = false;
+    for (const [nodeId, dest] of this.nodes.entries()) {
+      if (nodeId === from.node_id) continue; // don't echo back to sender
+      dest._ingestGossip(advertisement, from.node_id);
+      delivered = true;
+    }
+    return delivered;
   }
 
   list(): string[] {

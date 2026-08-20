@@ -45,9 +45,14 @@ Implementation sequencing per the master prompt. Vertical from the protocol outw
 - [ ] Opportunistic relay
 - (Implemented by Gemini agent through Android Studio; consumes canonical protocol.)
 
-## P5 — Multi-hop Edge
-- [ ] A → B → C → D with mixed connectivity
-- [ ] Capability gossip over local transports
+## P5 — Multi-hop Edge  (DONE in this iteration)
+- [x] Capability gossip protocol: nodes periodically broadcast `CapabilityAdvertisement` to direct peers; peers cache + rebroadcast (bounded by hop_count, loop-detected via path)
+- [x] `CapabilityCache` interface in core (in-memory impl; Prisma-backed for production future)
+- [x] LoopbackTransport gains a duck-typed `gossip()` / `onGossip()` side-channel (Transport interface UNCHANGED — no architecture change)
+- [x] NodeRuntime accepts optional `capabilityCache` dep; registers onGossip handler; has `gossipCapabilities()` method
+- [x] Router extends `RoutingContext` with `known_network` (deep cache); BFS-based multi-hop planning (A → B → C → D)
+- [x] Epidemic-routing fallback (ARCH-027) now conditional: only fires when NO multi-hop plan with a GATEWAY hop was found
+- [x] Proven in test: A → B → C → D with proactive route planning from gossiped capabilities
 
 ## P6 — Internet Gateway  (DONE in this iteration)
 - [x] Gateway runtime (`src/gateway/GatewayRuntime.ts`) bridges DTN bundles to ChannelAdapters when `recipient.kind === 'CHANNEL'`

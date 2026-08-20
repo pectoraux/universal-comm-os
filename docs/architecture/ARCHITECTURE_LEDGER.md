@@ -32,6 +32,9 @@ Numbered architectural decisions. Append-only. Each entry: ID, decision, rationa
 | ARCH-026 | Gateway runtime lives in `src/gateway/` and is owned by NodeRuntime as an optional dep. When `recipient.kind === 'CHANNEL'` AND the node advertises the matching GATEWAY capability, the bundle is delegated to the gateway runtime. | ACTIVE  |
 | ARCH-027 | Epidemic-routing fallback: relays replicate CHANNEL-recipient bundles to all non-sender peers when capability gossip (P5) is unavailable. Bundle_id dedup ensures correctness; one copy reaches the gateway. This is a legitimate DTN pattern, not a workaround. | ACTIVE  |
 | ARCH-028 | EmailAdapter is EXPERIMENTAL — in-process transcript only, not real SMTP. Clearly marked per Article X (no fake implementations: option 2 — experimental behind a boundary). The ChannelAdapter interface is the production boundary. | ACTIVE  |
+| ARCH-029 | CapabilityCache is an interface in core; in-memory impl for tests, Prisma-backed for production (future). Each node has its own cache populated by gossiped CapabilityAdvertisement objects. | ACTIVE  |
+| ARCH-030 | Router plans multi-hop routes proactively via BFS over the gossiped `known_network` (deep cache). When the cache is healthy, the router picks a specific first-hop peer instead of replicating to all peers. | ACTIVE  |
+| ARCH-031 | Capability gossip uses a duck-typed side-channel on transports (`gossip()` / `onGossip()` methods on LoopbackTransport). The Transport interface in core is UNCHANGED — no architecture change. Real edge transports (P4: Android BLE/Wi-Fi) MAY implement the same methods; if they don't, gossip simply doesn't propagate over them. | ACTIVE  |
 
 ---
 
@@ -129,3 +132,15 @@ Numbered architectural decisions. Append-only. Each entry: ID, decision, rationa
 ### ARCH-028 — EmailAdapter is EXPERIMENTAL (P6)
 - **Rationale**: Article X forbids fake implementations. A real EmailAdapter requires SMTP credentials, an email server, and the recipient's email client to decrypt — none of which exist in a sandbox. The EmailAdapter is therefore clearly marked EXPERIMENTAL — in-process transcript only. The ChannelAdapter interface is the production boundary; a real SMTP adapter can be dropped in without touching the core protocol.
 - **Implications**: `EmailAdapter.display_name = 'Email Adapter (EXPERIMENTAL — in-process transcript)'`. The transcript is observable in the UI as a list of "sent" emails with their opaque ciphertext bodies. Production deployment would swap in a real SMTP adapter implementing the same interface.
+
+### ARCH-029 — CapabilityCache interface (P5)
+- **Rationale**: Each node needs a deep view of the network (not just immediate peers) to plan multi-hop routes proactively. The cache stores `CapabilityAdvertisement` objects keyed by `origin_node_id`, with TTL-based expiry. In-memory impl for tests; Prisma-backed for production (future) — same interface, deployment choice.
+- **Implications**: `createCapabilityCache()` returns a `CapabilityCache` with `upsert`/`get`/`snapshot`/`prune`/`clear`/`size`. Advertisements carry a `ts` field set to `Date.now()` at each gossip round so TTL refreshes on every round; stale entries (older than TTL) are silently dropped by `get`/`snapshot`.
+
+### ARCH-030 — Multi-hop BFS route planning (P5)
+- **Rationale**: Without a deep network view, the router can only plan single-hop routes; multi-hop delivery relies on each relay re-routing on receipt (reactive, P3.5) or epidemic replication (ARCH-027, wasteful). With the gossiped `known_network`, the router can plan the full path proactively.
+- **Implications**: `RoutingContext.known_network?: Map<node_id, PeerCapabilities>`. The router's `planMultiHopViaKnownNetwork` runs BFS from each immediate peer, looking for a target node (the destNodeId, OR any node with the matching GATEWAY capability for destChannel). The first hop MUST be an immediate peer (verified via `ctx.known_peers`); subsequent hops are RELAY hops. Reliability degrades per hop. The opportunistic branch (branch 5) only fires when NO multi-hop plan was found.
+
+### ARCH-031 — Capability gossip side-channel (P5)
+- **Rationale**: Capability gossip needs to propagate over transports, but extending the `Transport` interface in `core/transport/Transport.ts` would be an architecture change (ACP). Instead, `LoopbackTransport` adds duck-typed `gossip()` and `onGossip()` methods. The NodeRuntime casts transports to access them — same pattern as `listReachablePeers` casts to access `peers`. Real edge transports (P4: Android BLE/Wi-Fi) MAY implement the same methods; if they don't, gossip simply doesn't propagate over them.
+- **Implications**: No ACP needed. The Transport interface stays at 4 methods (`isAvailable`/`send`/`onReceive`/`close?`). Gossip is "best effort" — nodes without gossip-capable transports still participate in the network via bundle routing, just without the deep view. The epidemic-routing fallback (ARCH-027) covers cold-start scenarios where gossip hasn't propagated yet.

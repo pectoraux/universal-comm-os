@@ -37,6 +37,7 @@ export * from './delivery/DeliveryTracker';
 // Capabilities
 export * from './capabilities/types';
 export * from './capabilities/NodeCapabilities';
+export * from './capabilities/CapabilityCache';
 
 // Policy
 export * from './policy/types';

@@ -68,7 +68,7 @@ phases:
 
   - id: P5
     name: Multi-hop Edge
-    status: PENDING
+    status: DONE
     items:
       - multi_hop_dtn
       - capability_gossip

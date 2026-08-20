@@ -76,3 +76,16 @@ export async function getEmailTranscriptAction() {
   const net = getNetwork();
   return net.emailTranscriptEntries();
 }
+
+// P5 additions
+
+export async function getCapabilityCachesAction() {
+  const net = getNetwork();
+  return net.capabilityCachesSnapshot();
+}
+
+export async function gossipNowAction() {
+  const net = getNetwork();
+  net.gossipAll();
+  return { ok: true };
+}

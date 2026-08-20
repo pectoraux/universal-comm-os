@@ -30,6 +30,7 @@ import type { RoutingPolicy } from '@/core/policy/types';
 import type { RoutePlan, RouteHop } from '@/core/routing/types';
 import type { Proof } from '@/core/bundle/types';
 import type { GatewayRuntime } from '@/gateway/GatewayRuntime';
+import type { CapabilityCache, CapabilityAdvertisement } from '@/core/capabilities/CapabilityCache';
 import { createRouter } from '@/core/routing/Router';
 import { createDeliveryTracker } from '@/core/delivery/DeliveryTracker';
 import { defaultPolicy } from '@/core/policy/RoutingPolicy';
@@ -37,6 +38,7 @@ import { isExpired, appendProof, canonicalEnvelope } from '@/core/bundle/Communi
 import { signProof } from '@/core/trust/Proof';
 import { hashBytes } from '@/core/trust/CryptoEnvelope';
 import { toRef } from '@/core/identity/UniversalIdentity';
+import { buildAdvertisement, rebroadcast } from '@/core/capabilities/CapabilityCache';
 
 export interface NodeRuntimeDeps {
   identity: UniversalIdentity;
@@ -53,6 +55,12 @@ export interface NodeRuntimeDeps {
    * (P6). When absent, CHANNEL-recipient bundles fall through to DTN forwarding.
    */
   gatewayRuntime?: GatewayRuntime;
+  /**
+   * Optional (P5): capability cache for gossiped peer capabilities. When present,
+   * the router uses the deep cache to plan multi-hop routes proactively. When
+   * absent, the router falls back to single-hop + epidemic routing.
+   */
+  capabilityCache?: CapabilityCache;
   /** Optional: gateway-facing adapter registry (legacy, replaced by gatewayRuntime). */
   gatewayRegistry?: Map<string, { node_id: string; channel: string }>;
 }
@@ -119,6 +127,12 @@ export interface NodeRuntime {
 
   /** Get all peers we can see, by aggregating transports. */
   listReachablePeers(): Promise<string[]>;
+
+  /** P5: push this node's capability advertisement to all peers (gossip). */
+  gossipCapabilities(): void;
+
+  /** P5: snapshot of this node's capability cache (gossiped view). */
+  capabilityCacheSnapshot(): CapabilityAdvertisement[];
 }
 
 export interface DispatchInput {
@@ -150,6 +164,43 @@ export function createNodeRuntime(deps: NodeRuntimeDeps): NodeRuntime {
     t.onReceive((bundle, from) => {
       void receiveBundle(bundle, from);
     });
+    // P5: register gossip handler (duck-typed — only LoopbackTransport implements this).
+    const anyT = t as unknown as {
+      onGossip?: (handler: (ad: CapabilityAdvertisement, from_node_id: string) => void) => void;
+    };
+    if (anyT.onGossip && deps.capabilityCache) {
+      anyT.onGossip((ad, from_node_id) => {
+        if (!deps.capabilityCache) return;
+        // Cache the advertisement.
+        const updated = deps.capabilityCache.upsert(ad);
+        // Rebroadcast to other peers (gossip propagation), bounded by hop_count.
+        if (updated) {
+          const rebroadcastAd = rebroadcast(ad, deps.capabilities.node_id);
+          if (rebroadcastAd) {
+            for (const tt of deps.transports) {
+              const anyTT = tt as unknown as { gossip?: (a: CapabilityAdvertisement) => boolean };
+              if (anyTT.gossip) anyTT.gossip(rebroadcastAd);
+            }
+          }
+        }
+      });
+    }
+  }
+
+  /**
+   * P5: push this node's capability advertisement to all peers.
+   * Called periodically (every 5s in the demo) and once at startup.
+   */
+  function gossipCapabilities(): void {
+    const ad = buildAdvertisement(deps.capabilities);
+    if (deps.capabilityCache) {
+      // Seed own cache.
+      deps.capabilityCache.upsert(ad);
+    }
+    for (const t of deps.transports) {
+      const anyT = t as unknown as { gossip?: (a: CapabilityAdvertisement) => boolean };
+      if (anyT.gossip) anyT.gossip(ad);
+    }
   }
 
   // ──────────────────────────────────────────────────────────────────────
@@ -296,24 +347,35 @@ export function createNodeRuntime(deps: NodeRuntimeDeps): NodeRuntime {
         sender_node_id: deps.capabilities.node_id,
         known_peers: peerCaps,
         destination: bundle.recipient.kind === 'IDENTITY' ? { identity_id: bundle.recipient.ref.id } : undefined,
+        // P5: deep network cache for proactive multi-hop planning.
+        known_network: buildKnownNetwork(deps.capabilityCache, peerCaps),
       },
       policy,
     );
 
+    // P5: if the router found a multi-hop plan, prefer it over the epidemic fallback.
+    // The router's BFS will produce a specific first hop (an immediate peer
+    // that has a path to the target). If no multi-hop plan was found, fall back
+    // to epidemic replication (ARCH-027, retired when gossip is healthy).
+
     // Targets to replicate to. Default: the router's plan first hop.
-    // Fallback (P6): if the router picked a peer but the bundle's recipient is
-    // a CHANNEL (i.e., we don't really know which peer is the gateway),
-    // replicate to ALL non-sender peers — one of them will be the gateway.
+    // Fallback (P6, refined in P5): if the router picked a peer but the bundle's
+    // recipient is a CHANNEL AND the router did NOT find a multi-hop plan to a
+    // gateway (i.e., the plan has no GATEWAY hop), replicate to ALL non-sender
+    // peers (epidemic routing). When P5 capability gossip is healthy, the
+    // router WILL find a GATEWAY hop and the fallback doesn't fire.
     let targetNodeIds: string[] = [];
     let transportHint: RouteHop['transport'] | undefined;
+    let hasGatewayHop = false;
     if (decision.status === 'ROUTE_FOUND' && decision.plan && decision.plan.hops.length > 0) {
       const firstHop = decision.plan.hops[0];
       transportHint = firstHop.transport;
       if (firstHop.to_node_id) targetNodeIds.push(firstHop.to_node_id);
+      hasGatewayHop = decision.plan.hops.some((h) => h.kind === 'GATEWAY');
     }
-    if (bundle.recipient.kind === 'CHANNEL' && targetNodeIds.length > 0) {
-      // CHANNEL recipient without capability gossip: replicate to all non-sender peers.
-      // Bundle_id dedup at the recipient ensures correctness.
+    if (bundle.recipient.kind === 'CHANNEL' && targetNodeIds.length > 0 && !hasGatewayHop) {
+      // CHANNEL recipient without a known gateway route: replicate to all
+      // non-sender peers (epidemic). Bundle_id dedup ensures correctness.
       targetNodeIds = candidatePeerIds;
     }
 
@@ -387,6 +449,8 @@ export function createNodeRuntime(deps: NodeRuntimeDeps): NodeRuntime {
         sender_node_id: deps.capabilities.node_id,
         known_peers: peerCaps,
         destination: input.destination,
+        // P5: deep network cache for proactive multi-hop planning.
+        known_network: buildKnownNetwork(deps.capabilityCache, peerCaps),
       },
       policy,
     );
@@ -471,6 +535,10 @@ export function createNodeRuntime(deps: NodeRuntimeDeps): NodeRuntime {
       return peek;
     },
     listReachablePeers,
+    gossipCapabilities,
+    capabilityCacheSnapshot() {
+      return deps.capabilityCache?.snapshot() ?? [];
+    },
   };
 }
 
@@ -521,6 +589,45 @@ function pickTransportForHop(
     const anyT = t as unknown as { peers?: Set<string> };
     return anyT.peers ? anyT.peers.has(hop.to_node_id) : true;
   });
+}
+
+/**
+ * P5: build the known_network map for the router from this node's
+ * capability cache + immediate peers. The cache contains gossiped
+ * CapabilityAdvertisement objects; we extract PeerCapabilities from each.
+ *
+ * The map includes:
+ *   - All gossiped peer capabilities (the deep view).
+ *   - All immediate peers' capabilities (from the routing context's
+ *     known_peers, which may be more up-to-date than the cache for direct
+ *     neighbors).
+ *
+ * If the capability cache is empty (cold start), returns undefined — the
+ * router falls back to single-hop + opportunistic + epidemic routing.
+ */
+function buildKnownNetwork(
+  cache: CapabilityCache | undefined,
+  immediatePeers: PeerCapabilities[],
+): Map<string, PeerCapabilities> | undefined {
+  if (!cache) return undefined;
+  const snapshot = cache.snapshot();
+  if (snapshot.length === 0) return undefined;
+  const map = new Map<string, PeerCapabilities>();
+  for (const ad of snapshot) {
+    const c = ad.capabilities;
+    map.set(c.node_id, {
+      node_id: c.node_id,
+      transport: Array.from(c.transport) as any,
+      relay: Array.from(c.relay) as any,
+      gateway: Array.from(c.gateway) as any,
+      verification: c.verification,
+    });
+  }
+  // Overlay with immediate peers (more up-to-date for direct neighbors).
+  for (const peer of immediatePeers) {
+    map.set(peer.node_id, peer);
+  }
+  return map;
 }
 
 export type { UniversalIdentity, UniversalIdentityRef, Proof, CommunicationBundle };

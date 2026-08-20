@@ -28,12 +28,15 @@ import {
   defaultPolicy,
   advertiseCapabilities,
   deriveRoles,
+  createCapabilityCache,
   type UniversalIdentity,
   type CommunicationBundle,
   type DeliveryRecord,
   type NodeCapabilities,
   type Intent,
   type Proof,
+  type CapabilityCache,
+  type CapabilityAdvertisement,
 } from '@/core/index';
 import nacl from 'tweetnacl';
 import { sha256 } from '@noble/hashes/sha2.js';
@@ -131,6 +134,8 @@ class SimulatedNetwork {
   readonly gatewayRuntimes = new Map<string, GatewayRuntime>();
   /** P6: email transcript (the EmailAdapter writes here). */
   emailTranscript: EmailTranscript = { entries: [] };
+  /** P5: periodic gossip timer. */
+  gossipTimer: ReturnType<typeof setInterval> | null = null;
   /** True = use persistent Prisma store; false = use in-memory store. */
   readonly persistent: boolean;
   readonly sweeper: TtlSweeper;
@@ -144,6 +149,26 @@ class SimulatedNetwork {
       this.sweeper.start();
     }
     this.setup();
+    // P5: kick off capability gossip. Each node gossips its own capabilities
+    // to direct peers; peers cache + rebroadcast. After ~2 rounds the whole
+    // network is in every node's cache, enabling proactive multi-hop routing.
+    this.gossipAll();
+    this.gossipTimer = setInterval(() => this.gossipAll(), 5_000);
+  }
+
+  /** P5: every node pushes its own capability advertisement. */
+  gossipAll(): void {
+    for (const rt of this.runtimes.values()) {
+      try { rt.gossipCapabilities(); } catch { /* ignore */ }
+    }
+  }
+
+  /** P5: snapshot of every node's capability cache (for UI). */
+  capabilityCachesSnapshot(): Array<{ node_id: string; entries: CapabilityAdvertisement[] }> {
+    return Array.from(this.runtimes.values()).map((rt) => ({
+      node_id: rt.node_id,
+      entries: rt.capabilityCacheSnapshot(),
+    }));
   }
 
   private setup() {
@@ -228,12 +253,16 @@ class SimulatedNetwork {
     const makeStore = (node_id: string): BundleStore =>
       this.persistent ? createPrismaBundleStore({ node_id }) : createInMemoryBundleStore();
 
+    // P5: each node gets its own capability cache for gossiped peer capabilities.
+    const makeCache = (): CapabilityCache => createCapabilityCache();
+
     const aliceRT = createNodeRuntime({
       identity: aliceId,
       capabilities: aliceCaps,
       transports: this.transports.get('alice')!,
       bundleStore: makeStore('alice'),
       signing_secret_key: aliceKp.signing_secret_key,
+      capabilityCache: makeCache(),
     });
     const bobRT = createNodeRuntime({
       identity: bobId,
@@ -241,6 +270,7 @@ class SimulatedNetwork {
       transports: this.transports.get('bob')!,
       bundleStore: makeStore('bob'),
       signing_secret_key: bobKp.signing_secret_key,
+      capabilityCache: makeCache(),
     });
     const relayRT = createNodeRuntime({
       identity: relayId,
@@ -248,6 +278,7 @@ class SimulatedNetwork {
       transports: this.transports.get('relay')!,
       bundleStore: makeStore('relay'),
       signing_secret_key: relayKp.signing_secret_key,
+      capabilityCache: makeCache(),
     });
     // P6: Gateway runtime with EmailAdapter (EXPERIMENTAL — in-process transcript).
     // The gateway node is the only node that has the EMAIL gateway capability.
@@ -271,6 +302,7 @@ class SimulatedNetwork {
       bundleStore: makeStore('gateway'),
       signing_secret_key: gatewayKp.signing_secret_key,
       gatewayRuntime,
+      capabilityCache: makeCache(),
     });
 
     this.runtimes.set('alice', aliceRT);
@@ -663,8 +695,15 @@ class SimulatedNetwork {
       await db.deliveryEvent.deleteMany({});
     }
     this.sweeper.stop();
+    if (this.gossipTimer) {
+      clearInterval(this.gossipTimer);
+      this.gossipTimer = null;
+    }
     this.setup();
     if (this.persistent) this.sweeper.start();
+    // P5: restart gossip for the fresh network.
+    this.gossipAll();
+    this.gossipTimer = setInterval(() => this.gossipAll(), 5_000);
   }
 }
 

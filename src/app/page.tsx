@@ -22,6 +22,8 @@ import {
   sweepOnceAction,
   getSweeperStatusAction,
   getEmailTranscriptAction,
+  getCapabilityCachesAction,
+  gossipNowAction,
 } from '@/app/actions/commos';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
@@ -138,6 +140,7 @@ export default function Home() {
   const [proofsView, setProofsView] = useState<{ bundle_id: string; proofs: Array<{ kind: string; signer_id: string; ts: number; verified: boolean }> } | null>(null);
   const [sweeperStatus, setSweeperStatus] = useState<{ running: boolean; last?: { expired_count: number; ts: number } } | null>(null);
   const [emailTranscript, setEmailTranscript] = useState<Array<{ message_id: string; to: string; from: string; subject: string; body: string; sent_at: number; bundle_id: string }>>([]);
+  const [capabilityCaches, setCapabilityCaches] = useState<Array<{ node_id: string; entries: Array<any> }>>([]);
 
   const [fromNode, setFromNode] = useState('alice');
   const [toNode, setToNode] = useState('bob');
@@ -150,13 +153,14 @@ export default function Home() {
   const [replicate, setReplicate] = useState(false);
 
   const refresh = useCallback(async () => {
-    const [n, ns, dl, q, ss, et] = await Promise.all([
+    const [n, ns, dl, q, ss, et, cc] = await Promise.all([
       getNetworkStateAction(),
       listNodesAction(),
       getDeliverySnapshotsAction(),
       getQueuedBundlesAction(),
       getSweeperStatusAction(),
       getEmailTranscriptAction(),
+      getCapabilityCachesAction(),
     ]);
     // Defer state updates out of the effect-render cycle to avoid cascading renders.
     setTimeout(() => {
@@ -167,6 +171,7 @@ export default function Home() {
       Promise.resolve(q).then((qq) => setQueues(qq));
       setSweeperStatus(ss as any);
       setEmailTranscript(et as any);
+      setCapabilityCaches(cc as any);
     }, 0);
   }, []);
 
@@ -261,6 +266,12 @@ export default function Home() {
     }
   }, [selectedBundleId, toast]);
 
+  const onGossipNow = useCallback(async () => {
+    await gossipNowAction();
+    toast({ title: `Gossip round executed`, description: `Each node pushed its capability advertisement to direct peers.` });
+    await refresh();
+  }, [toast, refresh]);
+
   const onReset = useCallback(async () => {
     await resetNetworkAction();
     setSelectedBundleId(null);
@@ -299,6 +310,7 @@ export default function Home() {
             lastDispatch={lastDispatch}
           />
           <NetworkTopology network={network} nodes={nodes} />
+          <CapabilityCacheCard caches={capabilityCaches} onGossipNow={onGossipNow} />
           <DtnStatusCard sweeperStatus={sweeperStatus} onSweepOnce={onSweepOnce} queues={queues} />
           <EmailTranscriptCard transcript={emailTranscript} />
           <DeliveryTimeline
@@ -341,7 +353,7 @@ function Header() {
           </div>
         </div>
         <Badge variant="outline" className="border-emerald-500 text-emerald-400">
-          P0 · P1 · P2 · P3 · P6 live
+          P0 · P1 · P2 · P3 · P5 · P6 live
         </Badge>
       </div>
     </header>
@@ -612,6 +624,68 @@ function DispatchComposer(props: {
             {lastDispatch.error && (
               <div className="text-xs text-red-400 mt-1">{lastDispatch.error}</div>
             )}
+          </div>
+        )}
+      </CardContent>
+    </Card>
+  );
+}
+
+function CapabilityCacheCard({
+  caches,
+  onGossipNow,
+}: {
+  caches: Array<{ node_id: string; entries: Array<any> }>;
+  onGossipNow: () => void;
+}) {
+  return (
+    <Card className="bg-slate-900/70 border-slate-800">
+      <CardHeader>
+        <CardTitle className="flex items-center gap-2 text-base">
+          <Layers className="w-4 h-4 text-amber-400" />
+          Capability Cache (P5 — gossiped view)
+        </CardTitle>
+        <CardDescription className="text-slate-400">
+          Each node&apos;s deep view of the network. Populated by periodic capability gossip over local transports. Lets the router plan multi-hop routes proactively (e.g., A → B → C → D).
+        </CardDescription>
+      </CardHeader>
+      <CardContent className="space-y-3">
+        <div className="flex items-center gap-2">
+          <Button size="sm" variant="outline" onClick={onGossipNow} className="border-amber-600 text-amber-300 hover:bg-amber-950">
+            <Radio className="w-3 h-3 mr-1" /> Run Gossip Round
+          </Button>
+          <span className="text-[10px] text-slate-500 font-mono">
+            Auto-gossip every 5s. Router uses deep cache for multi-hop BFS.
+          </span>
+        </div>
+        {caches.length === 0 ? (
+          <div className="text-sm text-slate-500 italic">No caches loaded yet.</div>
+        ) : (
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+            {caches.map((c) => (
+              <div key={c.node_id} className="rounded-lg border border-slate-800 bg-slate-950/50 p-3">
+                <div className="flex items-center justify-between mb-2">
+                  <Badge variant="outline" className="border-amber-500 text-amber-400 text-[10px] font-mono">
+                    <Server className="w-2.5 h-2.5 mr-1" />
+                    {c.node_id}
+                  </Badge>
+                  <span className="text-[10px] text-slate-500">{c.entries.length} entries</span>
+                </div>
+                <div className="space-y-1">
+                  {c.entries.length === 0 ? (
+                    <div className="text-[10px] text-slate-600 italic">empty (cold start)</div>
+                  ) : (
+                    c.entries.map((e) => (
+                      <div key={e.origin_node_id} className="text-[10px] font-mono flex items-center gap-2">
+                        <span className="text-slate-300">{e.origin_node_id}</span>
+                        <span className="text-slate-500">hops: {e.hop_count}</span>
+                        <span className="text-slate-600">via {e.path.join('→')}</span>
+                      </div>
+                    ))
+                  )}
+                </div>
+              </div>
+            ))}
           </div>
         )}
       </CardContent>
@@ -1052,7 +1126,7 @@ function RoadmapCard() {
     { id: 'P2', name: 'Local Transport', status: 'DONE' },
     { id: 'P3', name: 'DTN', status: 'DONE' },
     { id: 'P4', name: 'Android Edge', status: 'PENDING' },
-    { id: 'P5', name: 'Multi-hop Edge', status: 'PENDING' },
+    { id: 'P5', name: 'Multi-hop Edge', status: 'DONE' },
     { id: 'P6', name: 'Internet Gateway', status: 'DONE' },
     { id: 'P7', name: 'Matrix Fabric', status: 'PENDING' },
     { id: 'P8', name: 'External Channels', status: 'PENDING' },
@@ -1133,7 +1207,7 @@ function Footer({ onReset }: { onReset: () => void }) {
     <footer className="mt-auto border-t border-slate-800 bg-slate-900/50">
       <div className="container mx-auto px-4 py-3 flex items-center justify-between">
         <div className="text-[10px] text-slate-500 font-mono">
-          bundle → transport → destination (no Internet required) · ARCH-001..029 · tested in CI
+          bundle → transport → destination (no Internet required) · ARCH-001..031 · tested in CI
         </div>
         <Button size="sm" variant="outline" onClick={onReset} className="border-slate-700 text-slate-400 hover:bg-slate-800 text-xs">
           Reset Network
