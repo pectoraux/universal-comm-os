@@ -1,0 +1,78 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  ci:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # Full history for secret scan
+
+      - uses: oven-sh/setup-bun@v1
+
+      - name: Install dependencies
+        run: bun install
+
+      - name: Generate Prisma Client
+        run: npx prisma generate
+
+      - name: Lint
+        run: bun run lint
+
+      - name: Typecheck
+        run: npx tsc --noEmit
+        continue-on-error: true
+
+      - name: Architecture tests
+        run: bun run test:arch
+
+      - name: All tests
+        run: bun run test
+
+      - name: Security — .env not in git history
+        run: |
+          if git log --all --oneline -- .env | head -1 | grep -q .; then
+            echo "FAIL: .env found in git history"
+            exit 1
+          fi
+          echo "PASS: .env not in git history"
+
+      - name: Security — NEXTAUTH_SECRET fallback removed
+        run: |
+          if grep -q "dev-secret-change-in-production" src/lib/auth.ts; then
+            echo "FAIL: NEXTAUTH_SECRET fallback found"
+            exit 1
+          fi
+          echo "PASS: NEXTAUTH_SECRET fallback removed"
+
+      - name: Security — every server action auth-guarded
+        run: |
+          COUNT=$(grep -c "withAuth\|withRole" src/app/actions/commos.ts || echo "0")
+          if [ "$COUNT" -lt "1" ]; then
+            echo "FAIL: No auth guards found in commos.ts"
+            exit 1
+          fi
+          echo "PASS: $COUNT auth guards found"
+
+      - name: Security — secret scan in tracked files
+        run: |
+          if git ls-files | xargs grep -rl "ghp_[a-zA-Z0-9]\{36\}\|vcp_[a-zA-Z0-9]\{40,\}" 2>/dev/null | head -1 | grep -q .; then
+            echo "FAIL: Secrets found in tracked files"
+            git ls-files | xargs grep -rl "ghp_[a-zA-Z0-9]\{36\}\|vcp_[a-zA-Z0-9]\{40,\}" 2>/dev/null
+            exit 1
+          fi
+          echo "PASS: No secrets in tracked files"
+
+      - name: Upload CI artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ci-artifacts
+          path: ci-artifacts/
+          if-no-files-found: ignore

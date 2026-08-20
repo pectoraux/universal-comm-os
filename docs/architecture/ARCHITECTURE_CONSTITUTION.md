@@ -83,3 +83,16 @@ Frozen architectural decisions. Changing any of these requires an Architecture C
 Hardening sprints allow bug fixes, validation, bounds checks, crypto corrections, replay protection, authorization/authentication fixes, resource exhaustion protection, fuzzing, concurrency fixes, persistence integrity, protocol conformance, malicious-input handling, DoS resistance.
 
 Hardening sprints DO NOT authorize: protocol redesign, replacing Matrix, replacing DTN, changing identity/bundle/routing semantics, merging layers, replacing foundational abstractions. If a foundational problem is found: STOP → document → propose → await approval.
+
+## Article XII — Authentication vs Authorization (S0.1)
+
+Authentication answers "who are you?" Authorization answers "what are you allowed to operate on?"
+
+1. Every externally callable operation that accepts a resource identifier (node_id, bundle_id, conversation_id, channel_id) MUST authorize that identifier against the authenticated principal.
+2. A client-supplied resource identifier is NEVER proof of authority. The server MUST independently verify that the authenticated principal's organization owns or has access to the referenced resource.
+3. Unauthenticated callers receive 401/UNAUTHORIZED for every operation — including read-only ones.
+4. Authenticated callers without resource ownership receive 403/FORBIDDEN.
+5. Authenticated callers with ownership (or admin role) are allowed.
+6. Every authorized operation MUST be logged to an AuditEvent table with: actor identity, action, resource_id, timestamp, outcome (allowed/denied).
+7. Raw internal exceptions MUST NOT be returned to clients. All error responses use a safe structured format.
+8. Request origin MUST be validated at the web/API boundary to prevent cross-origin attacks.

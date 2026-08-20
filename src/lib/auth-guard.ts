@@ -21,6 +21,10 @@ import { getServerSession } from 'next-auth';
 import { authOptions } from '@/lib/auth';
 import type { Session } from 'next-auth';
 
+// S0.1: Re-export authorization utilities.
+export { AuthzError, safeError, logAuditEvent, authorizeNode, authorizeBundleAtNode, authorizeConversationAtNode, authorizeNetworkOperation } from '@/lib/authorization';
+export type { ResourceAuthContext } from '@/lib/authorization';
+
 export interface AuthContext {
   session: Session;
   userId: string;
