@@ -6,6 +6,21 @@
  *
  * Adapters translate between the universal communication model and external
  * channel semantics. The core MUST NOT contain `if whatsapp` / `if telegram` (ARCH-007).
+ *
+ * THREAT_MODEL §1 (Payload confidentiality): bundle payloads are end-to-end
+ * encrypted to the recipient. Relays, gateways, and CHANNEL ADAPTERS do not
+ * learn payload contents. The adapter therefore receives the OPAQUE bundle
+ * (ciphertext + envelope metadata) — never plaintext — and packages those
+ * opaque bytes into the channel-native format (e.g., email body).
+ *
+ * The recipient (who owns the X25519 secret key) decrypts on the other side
+ * of the channel. The channel provider may see ciphertext at rest — that is
+ * the channel-layer threat model, not the DTN-layer one.
+ *
+ * ARCH-029 (added in P6): the previous ChannelAdapter interface took
+ * `plaintext: Uint8Array` — that violated THREAT_MODEL §1. The interface
+ * now takes only the opaque bundle. This is a protocol-level correction,
+ * not an architecture change (THREAT_MODEL was already authoritative).
  */
 
 import type { CommunicationBundle } from '@/core/bundle/types';
@@ -25,9 +40,12 @@ export interface ChannelAdapter {
   isAvailable(): boolean;
 
   /**
-   * Translate a (decrypted) bundle envelope to an external-channel-native message
-   * and submit it via the channel's official API. The caller is responsible for
-   * decryption; the adapter receives plaintext only at the gateway boundary.
+   * Package the opaque bundle (ciphertext + envelope metadata) into the
+   * channel-native message format and submit it via the channel's official API.
+   *
+   * The adapter MUST NOT attempt to decrypt the bundle payload. It MUST
+   * package the opaque bytes (e.g., as an email body, SMS payload, etc.)
+   * such that the recipient can extract and decrypt them on the other side.
    */
   send(input: ChannelSendInput): Promise<ChannelSendResult>;
 
@@ -36,8 +54,9 @@ export interface ChannelAdapter {
 }
 
 export interface ChannelSendInput {
+  /** The opaque bundle — payload is encrypted to the recipient. */
   bundle: CommunicationBundle;
-  plaintext: Uint8Array;
+  /** Channel-specific recipient identifier (e.g., email address, phone number). */
   recipient_channel_id: string;
 }
 
@@ -46,6 +65,7 @@ export interface ChannelInbound {
   sender_channel_id: string;
   recipient_channel_id: string;
   received_at: number;
-  plaintext: Uint8Array;
+  /** Opaque bundle bytes extracted from the channel-native message. */
+  opaque_bundle: CommunicationBundle;
   metadata?: Record<string, string>;
 }

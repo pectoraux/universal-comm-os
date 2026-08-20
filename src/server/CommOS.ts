@@ -35,11 +35,15 @@ import {
   type Intent,
   type Proof,
 } from '@/core/index';
+import nacl from 'tweetnacl';
+import { sha256 } from '@noble/hashes/sha2.js';
 import { LoopbackBus, LoopbackTransport } from '@/transport/loopback/LoopbackTransport';
 import { createNodeRuntime, createInMemoryBundleStore, type NodeRuntime, type BundleStore } from '@/server/NodeRuntime';
 import { createPrismaBundleStore, createPrismaDeliveryTracker, type PersistedDeliveryTracker } from '@/server/PrismaBundleStore';
 import { createTtlSweeper, type TtlSweeper } from '@/server/TtlSweeper';
-import { utf8Encode, utf8Decode } from '@/core/util/encoding';
+import { createGatewayRuntime, type GatewayRuntime } from '@/gateway/GatewayRuntime';
+import { EmailAdapter, type EmailTranscript, type EmailTranscriptEntry } from '@/adapters/email/EmailAdapter';
+import { utf8Encode, utf8Decode, b64urlEncode } from '@/core/util/encoding';
 import { db } from '@/lib/db';
 
 export interface NodeDescriptor {
@@ -53,7 +57,13 @@ export interface NodeDescriptor {
 
 export interface DispatchRequest {
   from_node_id: string;
-  to_node_id: string;
+  /** Identity recipient (node_id). Mutually exclusive with to_channel. */
+  to_node_id?: string;
+  /** Channel recipient (e.g., email). Mutually exclusive with to_node_id. */
+  to_channel?: {
+    channel: 'EMAIL' | 'SMS' | 'WHATSAPP' | 'MATRIX' | 'TELEGRAM' | 'INSTAGRAM' | 'MESSENGER' | 'RCS';
+    channel_id: string; // e.g., 'bob@example.com'
+  };
   plaintext: string;
   intent_type: Intent['type'];
   priority?: Intent['priority'];
@@ -117,6 +127,10 @@ class SimulatedNetwork {
   readonly buses = new Map<string, LoopbackBus>();
   readonly transports = new Map<string, LoopbackTransport[]>();
   readonly dispatchedBundles = new Map<string, { bundle: CommunicationBundle; from_node_id: string; plaintext: string }>();
+  /** P6: gateway runtimes per node (only nodes with GATEWAY capability). */
+  readonly gatewayRuntimes = new Map<string, GatewayRuntime>();
+  /** P6: email transcript (the EmailAdapter writes here). */
+  emailTranscript: EmailTranscript = { entries: [] };
   /** True = use persistent Prisma store; false = use in-memory store. */
   readonly persistent: boolean;
   readonly sweeper: TtlSweeper;
@@ -235,12 +249,28 @@ class SimulatedNetwork {
       bundleStore: makeStore('relay'),
       signing_secret_key: relayKp.signing_secret_key,
     });
+    // P6: Gateway runtime with EmailAdapter (EXPERIMENTAL — in-process transcript).
+    // The gateway node is the only node that has the EMAIL gateway capability.
+    // When a bundle with recipient.kind === 'CHANNEL' arrives at the gateway,
+    // the gateway runtime delegates to the EmailAdapter.
+    const emailTranscript: EmailTranscript = { entries: [] };
+    this.emailTranscript = emailTranscript;
+    const emailAdapter = new EmailAdapter({
+      adapter_id: 'email-adapter-demo',
+      from_address: 'gateway@universal-comm-os.demo',
+      transcript: emailTranscript,
+    });
+    const gatewayRuntime = createGatewayRuntime();
+    gatewayRuntime.registerAdapter(emailAdapter);
+    this.gatewayRuntimes.set('gateway', gatewayRuntime);
+
     const gatewayRT = createNodeRuntime({
       identity: gatewayId,
       capabilities: gatewayCaps,
       transports: this.transports.get('gateway')!,
       bundleStore: makeStore('gateway'),
       signing_secret_key: gatewayKp.signing_secret_key,
+      gatewayRuntime,
     });
 
     this.runtimes.set('alice', aliceRT);
@@ -290,9 +320,49 @@ class SimulatedNetwork {
   async dispatch(req: DispatchRequest): Promise<DispatchResponse> {
     const senderRT = this.runtimes.get(req.from_node_id);
     if (!senderRT) return { status: 'ERROR', error: `Unknown from_node_id: ${req.from_node_id}` };
-    const recipientEntry = this.identities.get(req.to_node_id);
-    if (!recipientEntry) return { status: 'ERROR', error: `Unknown to_node_id: ${req.to_node_id}` };
+    if (!req.to_node_id && !req.to_channel) {
+      return { status: 'ERROR', error: 'Must specify either to_node_id or to_channel' };
+    }
+    if (req.to_node_id && req.to_channel) {
+      return { status: 'ERROR', error: 'Cannot specify both to_node_id and to_channel' };
+    }
     const senderEntry = this.identities.get(req.from_node_id)!;
+
+    // P6: For channel recipients, the bundle's payload is end-to-end encrypted
+    // to a key the channel recipient can decrypt with. In a real deployment,
+    // this would be a key pre-arranged between the sender and the recipient
+    // (e.g., looked up via P10 identity graph). For the demo, we synthesize a
+    // "channel identity" keypair per (channel, channel_id) — same input always
+    // produces the same keypair so the recipient's email client can decrypt.
+    let recipientEncryptionPubkey: Uint8Array;
+    let recipientRef: { id: string; signing_pubkey_hash: string; display_name?: string };
+    let recipientDescriptor: string;
+    let conversationId: string;
+    let destinationInput: { node_id?: string; channel?: string; channel_id?: string } | undefined;
+
+    if (req.to_node_id) {
+      const recipientEntry = this.identities.get(req.to_node_id);
+      if (!recipientEntry) return { status: 'ERROR', error: `Unknown to_node_id: ${req.to_node_id}` };
+      recipientEncryptionPubkey = recipientEntry.identity.public_keys.encryption_pubkey;
+      recipientRef = toRef(recipientEntry.identity);
+      recipientDescriptor = recipientEntry.identity.id;
+      conversationId = req.conversation_id ?? `conv:${req.from_node_id}:${req.to_node_id}`;
+      destinationInput = { node_id: req.to_node_id };
+    } else {
+      // Channel recipient. Synthesize a deterministic keypair for the channel_id.
+      const synth = synthesizeChannelIdentity(req.to_channel!.channel, req.to_channel!.channel_id);
+      recipientEncryptionPubkey = synth.pubkey;
+      recipientRef = {
+        id: synth.identity_id,
+        signing_pubkey_hash: synth.signing_pubkey_hash,
+      };
+      recipientDescriptor = `${req.to_channel!.channel}:${req.to_channel!.channel_id}`;
+      conversationId = req.conversation_id ?? `conv:${req.from_node_id}:${recipientDescriptor}`;
+      destinationInput = {
+        channel: req.to_channel!.channel,
+        channel_id: req.to_channel!.channel_id,
+      };
+    }
 
     const intent = createIntent({
       type: req.intent_type,
@@ -311,14 +381,18 @@ class SimulatedNetwork {
       intent_type: intent.type,
       expires_at,
       sender: toRef(senderEntry.identity),
-      recipient_encryption_pubkey: recipientEntry.identity.public_keys.encryption_pubkey,
+      recipient_encryption_pubkey: recipientEncryptionPubkey,
       plaintext: utf8Encode(req.plaintext),
     });
 
+    const recipient = req.to_node_id
+      ? { kind: 'IDENTITY' as const, ref: toRef(this.identities.get(req.to_node_id)!.identity) }
+      : { kind: 'CHANNEL' as const, channel: req.to_channel!.channel, channel_id: req.to_channel!.channel_id };
+
     const bundle = createBundle({
       sender: toRef(senderEntry.identity),
-      recipient: { kind: 'IDENTITY', ref: toRef(recipientEntry.identity) },
-      conversation_id: req.conversation_id ?? `conv:${req.from_node_id}:${req.to_node_id}`,
+      recipient,
+      conversation_id: conversationId,
       intent,
       encryption_metadata: tempEnvelope.encryption_metadata,
       payload: tempEnvelope.payload,
@@ -327,7 +401,7 @@ class SimulatedNetwork {
       routing_policy: {
         policy_id: defaultPolicy.policy_id,
         inline: {
-          replication_factor: req.replicate ? 3 : 1, // P3.4: replication factor
+          replication_factor: req.replicate ? 3 : 1,
           max_hops: defaultPolicy.max_hops,
           require_e2e: defaultPolicy.require_e2e,
         },
@@ -340,7 +414,7 @@ class SimulatedNetwork {
       intent_type: intent.type,
       expires_at: bundle.expires_at,
       sender: toRef(senderEntry.identity),
-      recipient_encryption_pubkey: recipientEntry.identity.public_keys.encryption_pubkey,
+      recipient_encryption_pubkey: recipientEncryptionPubkey,
       plaintext: utf8Encode(req.plaintext),
     });
     const signedBundle: CommunicationBundle = {
@@ -356,7 +430,7 @@ class SimulatedNetwork {
         sender_id: signedBundle.sender.id,
         sender_signing_pubkey_hash: signedBundle.sender.signing_pubkey_hash,
         recipient_kind: signedBundle.recipient.kind,
-        recipient_descriptor: signedBundle.recipient.kind === 'IDENTITY' ? signedBundle.recipient.ref.id : 'other',
+        recipient_descriptor: recipientDescriptor,
         conversation_id: signedBundle.conversation_id,
         intent_type: signedBundle.intent.type,
         priority: signedBundle.intent.priority,
@@ -389,7 +463,7 @@ class SimulatedNetwork {
 
     const result = await senderRT.dispatch({
       bundle: bundleWithProof,
-      destination: { node_id: req.to_node_id },
+      destination: destinationInput,
       replicate: req.replicate,
     });
 
@@ -416,6 +490,11 @@ class SimulatedNetwork {
         : undefined,
       error: result.error,
     };
+  }
+
+  /** P6: expose the email transcript for UI rendering. */
+  emailTranscriptEntries(): EmailTranscriptEntry[] {
+    return [...this.emailTranscript.entries];
   }
 
   /**
@@ -575,6 +654,8 @@ class SimulatedNetwork {
     this.buses.clear();
     this.transports.clear();
     this.dispatchedBundles.clear();
+    this.gatewayRuntimes.clear();
+    this.emailTranscript = { entries: [] };
     // Clear persistent tables too so the demo starts fresh.
     if (this.persistent) {
       await db.storedBundle.deleteMany({});
@@ -585,6 +666,32 @@ class SimulatedNetwork {
     this.setup();
     if (this.persistent) this.sweeper.start();
   }
+}
+
+/**
+ * P6: synthesize a deterministic identity keypair for a channel recipient.
+ * Same (channel, channel_id) always produces the same keypair, so the
+ * recipient's email client can decrypt any bundle sent to that address.
+ *
+ * NOTE: This is a DEMO mechanism. In production, the sender would look up
+ * the recipient's published encryption pubkey via the P10 identity graph.
+ */
+function synthesizeChannelIdentity(channel: string, channel_id: string): {
+  identity_id: string;
+  pubkey: Uint8Array;
+  signing_pubkey_hash: string;
+} {
+  const seedStr = `universal-comm-os|${channel}|${channel_id}`;
+  const seedBytes = new TextEncoder().encode(seedStr);
+  // Hash to 32 bytes for use as a NaCl X25519 secret key seed.
+  const seed = sha256(seedBytes);
+  const keypair = nacl.box.keyPair.fromSecretKey(seed);
+  const identity_id = `channel-identity:${channel}:${channel_id}`;
+  return {
+    identity_id,
+    pubkey: keypair.publicKey,
+    signing_pubkey_hash: b64urlEncode(sha256(keypair.publicKey)),
+  };
 }
 
 export function getNetwork(): SimulatedNetwork {

@@ -75,7 +75,7 @@ phases:
 
   - id: P6
     name: Internet Gateway
-    status: PENDING
+    status: DONE
     items:
       - dtn_to_internet_gateway
       - bundle_ingress

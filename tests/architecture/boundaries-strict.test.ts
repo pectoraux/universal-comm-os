@@ -113,6 +113,22 @@ function isForbiddenFromAdapters(imp: string): boolean {
   return FORBIDDEN_FROM_ADAPTERS.some((re) => re.test(imp));
 }
 
+// P6: gateway/* may import core/* + adapters/* (Architecture Constitution
+// Article I.4). It MUST NOT import matrix/*, transport impl, UI, or framework.
+const FORBIDDEN_FROM_GATEWAY: RegExp[] = [
+  /@\/matrix\//,
+  /@\/transport\/(loopback|lan|internet|dtn)/,
+  /@\/components\//,
+  /@\/app\//,
+  /@\/hooks\//,
+  /next$/,
+  /react$/,
+];
+
+function isForbiddenFromGateway(imp: string): boolean {
+  return FORBIDDEN_FROM_GATEWAY.some((re) => re.test(imp));
+}
+
 describe('Architecture (strict): forbidden imports', () => {
   const coreFiles = listFiles(join(SRC, 'core'), SRC_EXTENSIONS);
 
@@ -174,6 +190,24 @@ describe('Architecture (strict): forbidden imports', () => {
     if (violations.length > 0) {
       throw new Error(
         `Forbidden imports in src/adapters/*:\n${violations.map((v) => '  - ' + v).join('\n')}`,
+      );
+    }
+    expect(violations).toEqual([]);
+  });
+
+  it('gateway/ has no forbidden imports (P6)', () => {
+    const gatewayFiles = listFiles(join(SRC, 'gateway'), SRC_EXTENSIONS);
+    const violations: string[] = [];
+    for (const file of gatewayFiles) {
+      for (const imp of readImports(file)) {
+        if (isForbiddenFromGateway(imp)) {
+          violations.push(`${relative(PROJECT_ROOT, file)}: ${imp}`);
+        }
+      }
+    }
+    if (violations.length > 0) {
+      throw new Error(
+        `Forbidden imports in src/gateway/*:\n${violations.map((v) => '  - ' + v).join('\n')}`,
       );
     }
     expect(violations).toEqual([]);

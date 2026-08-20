@@ -21,6 +21,7 @@ import {
   getRelayForwardProofsAction,
   sweepOnceAction,
   getSweeperStatusAction,
+  getEmailTranscriptAction,
 } from '@/app/actions/commos';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
@@ -136,21 +137,26 @@ export default function Home() {
   const [decryptResult, setDecryptResult] = useState<{ ok: boolean; plaintext?: string; reason?: string } | null>(null);
   const [proofsView, setProofsView] = useState<{ bundle_id: string; proofs: Array<{ kind: string; signer_id: string; ts: number; verified: boolean }> } | null>(null);
   const [sweeperStatus, setSweeperStatus] = useState<{ running: boolean; last?: { expired_count: number; ts: number } } | null>(null);
+  const [emailTranscript, setEmailTranscript] = useState<Array<{ message_id: string; to: string; from: string; subject: string; body: string; sent_at: number; bundle_id: string }>>([]);
 
   const [fromNode, setFromNode] = useState('alice');
   const [toNode, setToNode] = useState('bob');
+  /** P6: 'identity' (to_node_id) or 'channel' (to_channel). */
+  const [recipientMode, setRecipientMode] = useState<'identity' | 'channel'>('identity');
+  const [toEmail, setToEmail] = useState('bob@example.com');
   const [intentType, setIntentType] = useState<'SEND_MESSAGE' | 'NOTIFY' | 'REQUEST_RESPONSE' | 'DELIVER_DOCUMENT' | 'SEND_MEDIA' | 'EMERGENCY_ALERT' | 'SYNC_CONVERSATION'>('SEND_MESSAGE');
   const [priority, setPriority] = useState<'BULK' | 'NORMAL' | 'PRIORITY' | 'URGENT' | 'EMERGENCY'>('NORMAL');
   const [plaintext, setPlaintext] = useState('Hello from offline-first fabric — encrypted end-to-end, relayed without Internet.');
   const [replicate, setReplicate] = useState(false);
 
   const refresh = useCallback(async () => {
-    const [n, ns, dl, q, ss] = await Promise.all([
+    const [n, ns, dl, q, ss, et] = await Promise.all([
       getNetworkStateAction(),
       listNodesAction(),
       getDeliverySnapshotsAction(),
       getQueuedBundlesAction(),
       getSweeperStatusAction(),
+      getEmailTranscriptAction(),
     ]);
     // Defer state updates out of the effect-render cycle to avoid cascading renders.
     setTimeout(() => {
@@ -160,6 +166,7 @@ export default function Home() {
       Promise.resolve(dl).then((d) => setDelivery(d));
       Promise.resolve(q).then((qq) => setQueues(qq));
       setSweeperStatus(ss as any);
+      setEmailTranscript(et as any);
     }, 0);
   }, []);
 
@@ -171,18 +178,23 @@ export default function Home() {
   }, [refresh]);
 
   const onDispatch = useCallback(async () => {
-    if (fromNode === toNode) {
+    if (recipientMode === 'identity' && fromNode === toNode) {
       toast({ title: 'Sender and recipient are the same', variant: 'destructive' });
       return;
     }
-    const res = await dispatchBundleAction({
+    const req: any = {
       from_node_id: fromNode,
-      to_node_id: toNode,
       plaintext,
       intent_type: intentType,
       priority,
       replicate,
-    });
+    };
+    if (recipientMode === 'identity') {
+      req.to_node_id = toNode;
+    } else {
+      req.to_channel = { channel: 'EMAIL', channel_id: toEmail };
+    }
+    const res = await dispatchBundleAction(req);
     setLastDispatch(res);
     if (res.status === 'DISPATCHED' || res.status === 'QUEUED') {
       toast({
@@ -202,7 +214,7 @@ export default function Home() {
       });
     }
     await refresh();
-  }, [fromNode, toNode, plaintext, intentType, priority, replicate, toast, refresh]);
+  }, [fromNode, toNode, toEmail, recipientMode, plaintext, intentType, priority, replicate, toast, refresh]);
 
   const onTryDecrypt = useCallback(async () => {
     if (!selectedBundleId) return;
@@ -270,6 +282,10 @@ export default function Home() {
             setFromNode={setFromNode}
             toNode={toNode}
             setToNode={setToNode}
+            recipientMode={recipientMode}
+            setRecipientMode={setRecipientMode}
+            toEmail={toEmail}
+            setToEmail={setToEmail}
             intentType={intentType}
             setIntentType={setIntentType}
             priority={priority}
@@ -284,6 +300,7 @@ export default function Home() {
           />
           <NetworkTopology network={network} nodes={nodes} />
           <DtnStatusCard sweeperStatus={sweeperStatus} onSweepOnce={onSweepOnce} queues={queues} />
+          <EmailTranscriptCard transcript={emailTranscript} />
           <DeliveryTimeline
             delivery={delivery}
             queues={queues}
@@ -324,7 +341,7 @@ function Header() {
           </div>
         </div>
         <Badge variant="outline" className="border-emerald-500 text-emerald-400">
-          P0 · P1 · P2 · P3 live
+          P0 · P1 · P2 · P3 · P6 live
         </Badge>
       </div>
     </header>
@@ -383,6 +400,10 @@ function DispatchComposer(props: {
   setFromNode: (s: string) => void;
   toNode: string;
   setToNode: (s: string) => void;
+  recipientMode: 'identity' | 'channel';
+  setRecipientMode: (m: 'identity' | 'channel') => void;
+  toEmail: string;
+  setToEmail: (s: string) => void;
   intentType: string;
   setIntentType: (s: any) => void;
   priority: string;
@@ -400,6 +421,10 @@ function DispatchComposer(props: {
     setFromNode,
     toNode,
     setToNode,
+    recipientMode,
+    setRecipientMode,
+    toEmail,
+    setToEmail,
     intentType,
     setIntentType,
     priority,
@@ -445,19 +470,55 @@ function DispatchComposer(props: {
             </Select>
           </div>
           <div className="space-y-2">
-            <Label htmlFor="to" className="text-xs uppercase tracking-wider text-slate-400">Recipient</Label>
-            <Select value={toNode} onValueChange={setToNode}>
-              <SelectTrigger id="to">
-                <SelectValue placeholder="Pick recipient" />
-              </SelectTrigger>
-              <SelectContent>
-                {nodes.map((n) => (
-                  <SelectItem key={n.node_id} value={n.node_id}>
-                    {n.display_name} ({n.roles.join(', ')})
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
+            <div className="flex items-center justify-between">
+              <Label className="text-xs uppercase tracking-wider text-slate-400">Recipient</Label>
+              <div className="flex gap-1">
+                <Button
+                  size="sm"
+                  variant={recipientMode === 'identity' ? 'default' : 'outline'}
+                  onClick={() => setRecipientMode('identity')}
+                  className="h-6 px-2 text-[10px]"
+                >
+                  Identity
+                </Button>
+                <Button
+                  size="sm"
+                  variant={recipientMode === 'channel' ? 'default' : 'outline'}
+                  onClick={() => setRecipientMode('channel')}
+                  className="h-6 px-2 text-[10px]"
+                >
+                  Email (P6)
+                </Button>
+              </div>
+            </div>
+            {recipientMode === 'identity' ? (
+              <Select value={toNode} onValueChange={setToNode}>
+                <SelectTrigger id="to">
+                  <SelectValue placeholder="Pick recipient" />
+                </SelectTrigger>
+                <SelectContent>
+                  {nodes.map((n) => (
+                    <SelectItem key={n.node_id} value={n.node_id}>
+                      {n.display_name} ({n.roles.join(', ')})
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            ) : (
+              <div className="space-y-1.5">
+                <input
+                  type="email"
+                  value={toEmail}
+                  onChange={(e) => setToEmail(e.target.value)}
+                  placeholder="recipient@example.com"
+                  className="w-full h-9 rounded-md border border-slate-700 bg-slate-950 px-3 text-sm font-mono text-slate-200 focus:outline-none focus:ring-1 focus:ring-emerald-500"
+                />
+                <p className="text-[10px] text-slate-500">
+                  Bundle routed via offline edge → relay → gateway (EMAIL) → external email inbox.
+                  End-to-end encrypted to a key derived from the email address (demo).
+                </p>
+              </div>
+            )}
           </div>
         </div>
 
@@ -710,6 +771,57 @@ function StatBlock({ label, value, color }: { label: string; value: string; colo
   );
 }
 
+function EmailTranscriptCard({ transcript }: { transcript: Array<{ message_id: string; to: string; from: string; subject: string; body: string; sent_at: number; bundle_id: string }> }) {
+  return (
+    <Card className="bg-slate-900/70 border-slate-800">
+      <CardHeader>
+        <CardTitle className="flex items-center gap-2 text-base">
+          <Send className="w-4 h-4 text-purple-400" />
+          Email Adapter Transcript (EXPERIMENTAL — P6)
+        </CardTitle>
+        <CardDescription className="text-slate-400">
+          The gateway&apos;s EmailAdapter packages opaque bundle bytes into email bodies. The recipient&apos;s email client decrypts on the other side. Gateway never sees plaintext.
+        </CardDescription>
+      </CardHeader>
+      <CardContent>
+        {transcript.length === 0 ? (
+          <div className="text-sm text-slate-500 italic">
+            No emails sent yet. Switch recipient to &quot;Email (P6)&quot; above and dispatch a bundle.
+          </div>
+        ) : (
+          <ScrollArea className="max-h-[400px] pr-3">
+            <div className="space-y-2">
+              {transcript.map((e) => (
+                <div key={e.message_id} className="rounded-lg border border-slate-800 bg-slate-950/50 p-3">
+                  <div className="flex items-center justify-between mb-1">
+                    <span className="font-mono text-xs text-slate-400">{e.message_id}</span>
+                    <Badge variant="outline" className="border-purple-500 text-purple-400 text-[10px]">
+                      EMAIL
+                    </Badge>
+                  </div>
+                  <div className="text-xs space-y-0.5 font-mono">
+                    <div><span className="text-slate-500">From:</span> <span className="text-slate-300">{e.from}</span></div>
+                    <div><span className="text-slate-500">To:</span> <span className="text-slate-300">{e.to}</span></div>
+                    <div><span className="text-slate-500">Subject:</span> <span className="text-slate-300">{e.subject}</span></div>
+                    <div><span className="text-slate-500">Bundle:</span> <span className="text-slate-300">{e.bundle_id.slice(0, 18)}…</span></div>
+                    <div><span className="text-slate-500">Sent at:</span> <span className="text-slate-300">{new Date(e.sent_at).toLocaleTimeString()}</span></div>
+                  </div>
+                  <details className="mt-2">
+                    <summary className="text-[10px] text-slate-500 cursor-pointer hover:text-slate-400">Show email body (opaque ciphertext)</summary>
+                    <pre className="mt-1 text-[10px] text-slate-500 font-mono whitespace-pre-wrap break-all max-h-32 overflow-y-auto">
+                      {e.body}
+                    </pre>
+                  </details>
+                </div>
+              ))}
+            </div>
+          </ScrollArea>
+        )}
+      </CardContent>
+    </Card>
+  );
+}
+
 function DeliveryTimeline({
   delivery,
   queues,
@@ -941,7 +1053,7 @@ function RoadmapCard() {
     { id: 'P3', name: 'DTN', status: 'DONE' },
     { id: 'P4', name: 'Android Edge', status: 'PENDING' },
     { id: 'P5', name: 'Multi-hop Edge', status: 'PENDING' },
-    { id: 'P6', name: 'Internet Gateway', status: 'PENDING' },
+    { id: 'P6', name: 'Internet Gateway', status: 'DONE' },
     { id: 'P7', name: 'Matrix Fabric', status: 'PENDING' },
     { id: 'P8', name: 'External Channels', status: 'PENDING' },
     { id: 'P9', name: 'Intelligent Routing', status: 'PENDING' },
@@ -1021,7 +1133,7 @@ function Footer({ onReset }: { onReset: () => void }) {
     <footer className="mt-auto border-t border-slate-800 bg-slate-900/50">
       <div className="container mx-auto px-4 py-3 flex items-center justify-between">
         <div className="text-[10px] text-slate-500 font-mono">
-          bundle → transport → destination (no Internet required) · ARCH-001..024 · tested in CI
+          bundle → transport → destination (no Internet required) · ARCH-001..029 · tested in CI
         </div>
         <Button size="sm" variant="outline" onClick={onReset} className="border-slate-700 text-slate-400 hover:bg-slate-800 text-xs">
           Reset Network

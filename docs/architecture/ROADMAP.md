@@ -49,10 +49,12 @@ Implementation sequencing per the master prompt. Vertical from the protocol outw
 - [ ] A → B → C → D with mixed connectivity
 - [ ] Capability gossip over local transports
 
-## P6 — Internet Gateway
-- [ ] DTN → Internet gateway runtime
-- [ ] Bundle ingress from edge fabric to gateway
-- [ ] Gateway egress to global fabric
+## P6 — Internet Gateway  (DONE in this iteration)
+- [x] Gateway runtime (`src/gateway/GatewayRuntime.ts`) bridges DTN bundles to ChannelAdapters when `recipient.kind === 'CHANNEL'`
+- [x] EmailAdapter (`src/adapters/email/EmailAdapter.ts`) — EXPERIMENTAL in-process transcript, packages opaque ciphertext into email body
+- [x] ChannelAdapter interface fixed: takes opaque bytes only (THREAT_MODEL §1: channel adapters do NOT learn payload contents)
+- [x] Prove offline user → Internet gateway: Alice (offline) → Relay → Gateway → EmailAdapter (logged to transcript)
+- [x] Epidemic-routing fallback in `tryForward`: relays replicate CHANNEL-recipient bundles to all non-sender peers (necessary without P5 capability gossip)
 
 ## P7 — Matrix Fabric
 - [ ] Matrix client adapter

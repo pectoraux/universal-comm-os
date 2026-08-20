@@ -28,6 +28,10 @@ Numbered architectural decisions. Append-only. Each entry: ID, decision, rationa
 | ARCH-022 | Per-node delivery state machine lives in-memory (live source of truth) AND is mirrored to the DB for forensics/restart. The in-memory tracker is authoritative for ARCH-012 conformance. | ACTIVE  |
 | ARCH-023 | RELAY_FORWARD proofs are signed by relays using their Ed25519 signing key and appended to the bundle's `proofs[]`. The recipient verifies the entire chain. Relays do NOT need the sender's signing key. | ACTIVE  |
 | ARCH-024 | Replication fan-out sends the same bundle_id to N independent peers in parallel. Deduplication at the recipient (canonical bundle_id) makes the first-arrival-wins semantics automatic. | ACTIVE  |
+| ARCH-025 | ChannelAdapter interface takes opaque bundle bytes only (THREAT_MODEL §1: channel adapters do NOT learn payload contents). Corrected from the previous interface that took plaintext. | ACTIVE  |
+| ARCH-026 | Gateway runtime lives in `src/gateway/` and is owned by NodeRuntime as an optional dep. When `recipient.kind === 'CHANNEL'` AND the node advertises the matching GATEWAY capability, the bundle is delegated to the gateway runtime. | ACTIVE  |
+| ARCH-027 | Epidemic-routing fallback: relays replicate CHANNEL-recipient bundles to all non-sender peers when capability gossip (P5) is unavailable. Bundle_id dedup ensures correctness; one copy reaches the gateway. This is a legitimate DTN pattern, not a workaround. | ACTIVE  |
+| ARCH-028 | EmailAdapter is EXPERIMENTAL — in-process transcript only, not real SMTP. Clearly marked per Article X (no fake implementations: option 2 — experimental behind a boundary). The ChannelAdapter interface is the production boundary. | ACTIVE  |
 
 ---
 
@@ -109,3 +113,19 @@ Numbered architectural decisions. Append-only. Each entry: ID, decision, rationa
 ### ARCH-024 — Replication fan-out semantics (P3.4)
 - **Rationale**: In a DTN, the same bundle may be carried by N independent relays simultaneously. Whichever path arrives first wins; the recipient's dedup logic (canonical bundle_id) makes the second arrival a no-op.
 - **Implications**: `dispatch({replicate: true})` sends the same bundle_id to up to `policy.replication_factor` peers in parallel. The router's `pickReplicas()` returns the primary hop + other reachable peers, capped at the factor. Cost vs. reliability trade-off is policy, not architecture.
+
+### ARCH-025 — ChannelAdapter takes opaque bytes only (P6)
+- **Rationale**: THREAT_MODEL §1 states "channel adapters do not learn payload contents." The previous interface took `plaintext: Uint8Array` — a contradiction. The interface now takes only the opaque bundle (ciphertext + envelope metadata). The adapter packages opaque bytes into the channel-native format (email body, SMS payload, etc.) and the recipient decrypts on the other side.
+- **Implications**: This is a protocol-level correction, not an architecture change. THREAT_MODEL was already authoritative; the interface was speculative and is now aligned.
+
+### ARCH-026 — Gateway runtime ownership (P6)
+- **Rationale**: The gateway runtime is the bridge between DTN bundles and external ChannelAdapters. It must live in its own layer (`src/gateway/`) and be owned by NodeRuntime as an optional dep — when absent, CHANNEL-recipient bundles fall through to DTN forwarding (P3 behavior). When present AND the node advertises the matching GATEWAY capability, the runtime delegates to the adapter.
+- **Implications**: `NodeRuntimeDeps.gatewayRuntime?: GatewayRuntime`. The check `isChannelGateway = recipient.kind === 'CHANNEL' && deps.gatewayRuntime && deps.capabilities.gateway.has(recipient.channel)` enforces ARCH-018 ("a node is NOT a gateway merely because it has Internet").
+
+### ARCH-027 — Epidemic-routing fallback (P6)
+- **Rationale**: Without capability gossip (P5 territory), a relay cannot know which peer is the gateway for a given channel. The router's opportunistic branch picks ONE peer, which may be the wrong one (e.g., the original sender). To make P6 provable today, relays replicate CHANNEL-recipient bundles to ALL non-sender peers simultaneously. Bundle_id dedup at each peer ensures correctness; the gateway handles it, others silently drop.
+- **Implications**: This is a legitimate DTN "epidemic routing" pattern (RFC 7567-style). When P5 capability gossip is implemented, the router will pick a specific peer and replication becomes unnecessary (a routing optimization, not a correctness change).
+
+### ARCH-028 — EmailAdapter is EXPERIMENTAL (P6)
+- **Rationale**: Article X forbids fake implementations. A real EmailAdapter requires SMTP credentials, an email server, and the recipient's email client to decrypt — none of which exist in a sandbox. The EmailAdapter is therefore clearly marked EXPERIMENTAL — in-process transcript only. The ChannelAdapter interface is the production boundary; a real SMTP adapter can be dropped in without touching the core protocol.
+- **Implications**: `EmailAdapter.display_name = 'Email Adapter (EXPERIMENTAL — in-process transcript)'`. The transcript is observable in the UI as a list of "sent" emails with their opaque ciphertext bodies. Production deployment would swap in a real SMTP adapter implementing the same interface.

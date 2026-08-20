@@ -147,21 +147,29 @@ function planHopsForPeer(
     }
   }
 
-  // 4. Direct hop to a peer (no specific destination) — used for opportunistic delivery.
-  if (!destNodeId && !destChannel) {
-    for (const peer of ctx.known_peers) {
-      for (const t of peer.transport) {
-        if (!isTransportAllowed(policy, t)) continue;
-        candidatePlans.push([
-          {
-            kind: 'TRANSPORT',
-            to_node_id: peer.node_id,
-            transport: t,
-            est_reliability: 0.7,
-            est_latency_ms: 100,
-            est_cost: 1,
-          },
-        ]);
+  // 4. Direct hop to a peer — opportunistic delivery.
+  //    a) No specific destination: send to any reachable peer.
+  //    b) destChannel set but no peer advertised the matching gateway capability
+  //       (we may simply lack gossiped capability info — P5 territory).
+  //       Fall back to sending to the first reachable peer; the relay will
+  //       re-route on receipt per P3.5 multi-hop forwarding.
+  if (!destNodeId) {
+    const opportunisticOk = !destChannel || candidatePlans.length === 0;
+    if (opportunisticOk) {
+      for (const peer of ctx.known_peers) {
+        for (const t of peer.transport) {
+          if (!isTransportAllowed(policy, t)) continue;
+          candidatePlans.push([
+            {
+              kind: 'TRANSPORT',
+              to_node_id: peer.node_id,
+              transport: t,
+              est_reliability: 0.7,
+              est_latency_ms: 100,
+              est_cost: 1,
+            },
+          ]);
+        }
       }
     }
   }

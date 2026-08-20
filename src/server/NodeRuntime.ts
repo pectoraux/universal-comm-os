@@ -29,6 +29,7 @@ import type { DeliveryTracker } from '@/core/delivery/DeliveryTracker';
 import type { RoutingPolicy } from '@/core/policy/types';
 import type { RoutePlan, RouteHop } from '@/core/routing/types';
 import type { Proof } from '@/core/bundle/types';
+import type { GatewayRuntime } from '@/gateway/GatewayRuntime';
 import { createRouter } from '@/core/routing/Router';
 import { createDeliveryTracker } from '@/core/delivery/DeliveryTracker';
 import { defaultPolicy } from '@/core/policy/RoutingPolicy';
@@ -46,7 +47,13 @@ export interface NodeRuntimeDeps {
   bundleStore?: BundleStore;
   /** Optional: the node's signing secret key (needed to sign RELAY_FORWARD proofs). */
   signing_secret_key?: Uint8Array;
-  /** Optional: gateway-facing adapter registry. */
+  /**
+   * Optional: the gateway runtime. When present AND this node advertises the
+   * matching GATEWAY capability, CHANNEL-recipient bundles are delegated here
+   * (P6). When absent, CHANNEL-recipient bundles fall through to DTN forwarding.
+   */
+  gatewayRuntime?: GatewayRuntime;
+  /** Optional: gateway-facing adapter registry (legacy, replaced by gatewayRuntime). */
   gatewayRegistry?: Map<string, { node_id: string; channel: string }>;
 }
 
@@ -169,6 +176,15 @@ export function createNodeRuntime(deps: NodeRuntimeDeps): NodeRuntime {
     const isRecipient =
       bundle.recipient.kind === 'IDENTITY' && bundle.recipient.ref.id === deps.identity.id;
 
+    // P6: CHANNEL-recipient handling. If this node has a gatewayRuntime AND
+    // advertises the matching GATEWAY capability, the gateway handles it.
+    // ARCH-028: a node is NOT a gateway merely because it has Internet; the
+    // GATEWAY capability must be explicit and the adapter must be registered.
+    const isChannelGateway =
+      bundle.recipient.kind === 'CHANNEL' &&
+      deps.gatewayRuntime !== undefined &&
+      deps.capabilities.gateway.has(bundle.recipient.channel as any);
+
     if (!tracker.get(bundle.bundle_id)) tracker.init(bundle.bundle_id);
 
     try {
@@ -182,6 +198,46 @@ export function createNodeRuntime(deps: NodeRuntimeDeps): NodeRuntime {
         // This node IS the destination identity.
         tracker.transition(bundle.bundle_id, 'RELAYED', { node: from_node_id });
         tracker.transition(bundle.bundle_id, 'DELIVERED', { node: deps.capabilities.node_id });
+        return;
+      }
+
+      if (isChannelGateway) {
+        // P6: delegate to the gateway runtime.
+        // State machine flow: ACCEPTED → RELAYED → GATEWAY_REACHED →
+        // EXTERNAL_ACCEPTED → DELIVERED.
+        // (RELAYED here = "bundle was relayed to me by an upstream peer".)
+        tracker.transition(bundle.bundle_id, 'RELAYED', {
+          node: from_node_id,
+          note: 'gateway received via relay',
+        });
+        tracker.transition(bundle.bundle_id, 'GATEWAY_REACHED', {
+          node: deps.capabilities.node_id,
+          note: `gateway for channel ${bundle.recipient.channel}`,
+        });
+        const result = await deps.gatewayRuntime!.handleBundle({
+          bundle,
+          recipient_channel: bundle.recipient.channel as any,
+          recipient_channel_id: bundle.recipient.channel_id,
+        });
+        if (result.status === 'OK') {
+          tracker.transition(bundle.bundle_id, 'EXTERNAL_ACCEPTED', {
+            node: deps.capabilities.node_id,
+            transport: bundle.recipient.channel,
+            note: `external_message_id: ${result.external_message_id ?? 'n/a'}`,
+          });
+          // For demo purposes, we also mark DELIVERED when the external channel
+          // accepts (the actual "read" by the recipient happens out-of-band
+          // via the channel's native retrieval, e.g., checking email).
+          tracker.transition(bundle.bundle_id, 'DELIVERED', {
+            node: deps.capabilities.node_id,
+            note: 'external channel accepted; recipient reads via channel',
+          });
+        } else {
+          tracker.transition(bundle.bundle_id, 'GATEWAY_UNAVAILABLE', {
+            node: deps.capabilities.node_id,
+            note: `gateway failed: ${result.status} — ${result.reason ?? ''}`,
+          });
+        }
         return;
       }
 
@@ -207,6 +263,15 @@ export function createNodeRuntime(deps: NodeRuntimeDeps): NodeRuntime {
   /**
    * tryForward: the relay runs its own router to find a next hop and forwards
    * the bundle. Signs a RELAY_FORWARD proof and appends it (P3.6).
+   *
+   * P6 addition: when the router cannot find a specific route (typically
+   * because the bundle's recipient is a CHANNEL and we lack gossiped peer
+   * capabilities — P5 territory), the relay REPLICATES the bundle to ALL
+   * non-sender peers simultaneously. Bundle_id dedup at each peer ensures
+   * only one copy is processed; the gateway handles it, others silently drop.
+   * This is a legitimate DTN "epidemic routing" fallback for partitioned
+   * operation. With P5 capability gossip, the router will pick a specific peer.
+   *
    * Returns true if the bundle was forwarded to at least one peer.
    */
   async function tryForward(
@@ -214,15 +279,16 @@ export function createNodeRuntime(deps: NodeRuntimeDeps): NodeRuntime {
     from_node_id: string,
   ): Promise<boolean> {
     const peers = await listReachablePeers();
-    const peerCaps = peers
-      .filter((n) => n !== from_node_id) // don't bounce back to sender
-      .map((node_id) => ({
-        node_id,
-        transport: deps.transports.filter((t) => t.isAvailable()).map((t) => t.transport_type),
-        relay: deps.capabilities.relay.size > 0 ? (['STORE', 'FORWARD'] as Array<'STORE' | 'FORWARD'>) : ([] as Array<'STORE' | 'FORWARD'>),
-        gateway: Array.from(deps.capabilities.gateway),
-        verification: deps.capabilities.verification,
-      }));
+    const candidatePeerIds = peers.filter((n) => n !== from_node_id);
+    if (candidatePeerIds.length === 0) return false;
+
+    const peerCaps = candidatePeerIds.map((node_id) => ({
+      node_id,
+      transport: deps.transports.filter((t) => t.isAvailable()).map((t) => t.transport_type),
+      relay: deps.capabilities.relay.size > 0 ? (['STORE', 'FORWARD'] as Array<'STORE' | 'FORWARD'>) : ([] as Array<'STORE' | 'FORWARD'>),
+      gateway: Array.from(deps.capabilities.gateway),
+      verification: deps.capabilities.verification,
+    }));
 
     const decision = route(
       {
@@ -234,39 +300,67 @@ export function createNodeRuntime(deps: NodeRuntimeDeps): NodeRuntime {
       policy,
     );
 
-    if (decision.status !== 'ROUTE_FOUND' || !decision.plan || decision.plan.hops.length === 0) {
-      return false;
+    // Targets to replicate to. Default: the router's plan first hop.
+    // Fallback (P6): if the router picked a peer but the bundle's recipient is
+    // a CHANNEL (i.e., we don't really know which peer is the gateway),
+    // replicate to ALL non-sender peers — one of them will be the gateway.
+    let targetNodeIds: string[] = [];
+    let transportHint: RouteHop['transport'] | undefined;
+    if (decision.status === 'ROUTE_FOUND' && decision.plan && decision.plan.hops.length > 0) {
+      const firstHop = decision.plan.hops[0];
+      transportHint = firstHop.transport;
+      if (firstHop.to_node_id) targetNodeIds.push(firstHop.to_node_id);
+    }
+    if (bundle.recipient.kind === 'CHANNEL' && targetNodeIds.length > 0) {
+      // CHANNEL recipient without capability gossip: replicate to all non-sender peers.
+      // Bundle_id dedup at the recipient ensures correctness.
+      targetNodeIds = candidatePeerIds;
     }
 
-    const firstHop = decision.plan.hops[0];
-    if (!firstHop.to_node_id) return false;
-    // Pick the transport that (a) matches the hop's transport type AND (b) actually
-    // has the target peer in its peer set. A relay may have multiple transports
-    // of the same type on different buses; the wrong one would fail the send.
-    const transport = pickTransportForHop(deps.transports, firstHop);
-    if (!transport || !transport.isAvailable()) return false;
+    if (targetNodeIds.length === 0) return false;
 
-    // Sign a RELAY_FORWARD proof and append it to the bundle before forwarding (P3.6).
-    let bundleToForward = bundle;
-    if (deps.signing_secret_key) {
-      const relayProof = signProof(
-        'RELAY_FORWARD',
-        {
-          bundle_id: bundle.bundle_id,
-          relay_node_id: deps.capabilities.node_id,
-          from_node_id,
-          to_node_id: firstHop.to_node_id,
-          transport: firstHop.transport ?? 'unknown',
-          ts: Date.now(),
-        },
-        toRef(deps.identity),
-        deps.signing_secret_key,
-      );
-      bundleToForward = appendProof(bundle, relayProof);
+    // Send to each target via the appropriate transport. Returns true if at
+    // least one send succeeded.
+    const sendResults = await Promise.all(
+      targetNodeIds.map(async (toNodeId) => {
+        const hop = { transport: transportHint, to_node_id: toNodeId };
+        const transport = pickTransportForHop(deps.transports, hop);
+        if (!transport || !transport.isAvailable()) {
+          // Try any available transport that has this peer.
+          const anyT = deps.transports.find((t) => {
+            if (!t.isAvailable()) return false;
+            const anyT = t as unknown as { peers?: Set<string> };
+            return anyT.peers ? anyT.peers.has(toNodeId) : false;
+          });
+          if (!anyT) return false;
+          return await sendWithProof(anyT, toNodeId);
+        }
+        return await sendWithProof(transport, toNodeId);
+      }),
+    );
+    return sendResults.some((ok) => ok);
+
+    async function sendWithProof(transport: Transport, to_node_id: string): Promise<boolean> {
+      let bundleToForward = bundle;
+      if (deps.signing_secret_key) {
+        const relayProof = signProof(
+          'RELAY_FORWARD',
+          {
+            bundle_id: bundle.bundle_id,
+            relay_node_id: deps.capabilities.node_id,
+            from_node_id,
+            to_node_id,
+            transport: transport.transport_type,
+            ts: Date.now(),
+          },
+          toRef(deps.identity),
+          deps.signing_secret_key,
+        );
+        bundleToForward = appendProof(bundle, relayProof);
+      }
+      const result = await transport.send(bundleToForward, to_node_id);
+      return result.kind === 'OK';
     }
-
-    const result = await transport.send(bundleToForward, firstHop.to_node_id);
-    return result.kind === 'OK';
   }
 
   // ──────────────────────────────────────────────────────────────────────

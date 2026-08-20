@@ -69,3 +69,10 @@ export async function getSweeperStatusAction() {
   const net = getNetwork();
   return net.sweeperStatus();
 }
+
+// P6 additions
+
+export async function getEmailTranscriptAction() {
+  const net = getNetwork();
+  return net.emailTranscriptEntries();
+}
