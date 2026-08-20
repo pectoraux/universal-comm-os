@@ -205,13 +205,17 @@ describe('P6 — Internet Gateway (offline edge → relay → gateway → email 
     const relayRec = relayRT.delivery.get(bundle.bundle_id);
     expect(relayRec?.current).toBe('RELAYED');
 
-    // Gateway's side: GATEWAY_REACHED → EXTERNAL_ACCEPTED → DELIVERED.
+    // Gateway's side: GATEWAY_REACHED → EXTERNAL_ACCEPTED (NOT DELIVERED).
+    // AUDIT-FIX: the false DELIVERED transition at the gateway has been removed.
+    // The recipient reads via the channel's native client — true DELIVERED
+    // only happens when the recipient actually reads the message.
     const gatewayRec = gatewayRT.delivery.get(bundle.bundle_id);
-    expect(gatewayRec?.current).toBe('DELIVERED');
+    expect(gatewayRec?.current).toBe('EXTERNAL_ACCEPTED');
     const transitions = gatewayRec?.history.map((h) => h.to) ?? [];
     expect(transitions).toContain('GATEWAY_REACHED');
     expect(transitions).toContain('EXTERNAL_ACCEPTED');
-    expect(transitions).toContain('DELIVERED');
+    // DELIVERED should NOT be in the transitions — the recipient hasn't read yet.
+    expect(transitions).not.toContain('DELIVERED');
 
     // The EmailAdapter "sent" the bundle — its transcript has one entry.
     const transcript = emailAdapter.getTranscript();

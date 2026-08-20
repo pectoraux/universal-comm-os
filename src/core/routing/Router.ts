@@ -446,7 +446,7 @@ function planMultiHopViaKnownNetwork(
       if (!lastNode) continue;
 
       // Check if any node reachable from `lastNode` is a target.
-      // We approximate "reachable" as "any node in the known_network that
+      // We model "reachable" as "any node in the known_network that
       // isn't already in the path AND has a FORWARD relay capability."
       for (const candidate of allNodes) {
         if (visited.has(candidate.node_id)) continue;

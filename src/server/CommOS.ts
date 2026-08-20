@@ -43,8 +43,6 @@ import {
   type IdentityGraph,
   type LinkedChannelIdentity,
 } from '@/core/index';
-import nacl from 'tweetnacl';
-import { sha256 } from '@noble/hashes/sha2.js';
 import { LoopbackBus, LoopbackTransport } from '@/transport/loopback/LoopbackTransport';
 import { createNodeRuntime, createInMemoryBundleStore, type NodeRuntime, type BundleStore } from '@/server/NodeRuntime';
 import { createPrismaBundleStore, createPrismaDeliveryTracker, type PersistedDeliveryTracker } from '@/server/PrismaBundleStore';
@@ -53,7 +51,7 @@ import { createGatewayRuntime, type GatewayRuntime } from '@/gateway/GatewayRunt
 import { EmailAdapter, type EmailTranscript, type EmailTranscriptEntry } from '@/adapters/email/EmailAdapter';
 import { SmsAdapter, type SmsTranscript, type SmsTranscriptEntry } from '@/adapters/sms/SmsAdapter';
 import { WhatsappAdapter, type WhatsappTranscript, type WhatsappTranscriptEntry } from '@/adapters/whatsapp/WhatsappAdapter';
-import { utf8Encode, utf8Decode, b64urlEncode } from '@/core/util/encoding';
+import { utf8Encode, utf8Decode } from '@/core/util/encoding';
 import { db } from '@/lib/db';
 
 export interface InboxMessage {
@@ -238,9 +236,9 @@ class SimulatedNetwork {
 
   /**
    * P10: resolve a channel recipient to their real UniversalIdentityRef +
-   * encryption pubkey. Returns undefined if no verified link exists (in
-   * which case the caller falls back to the synthesized keypair — a
-   * backward-compat hack retained for the demo's pre-link bootstrap).
+   * encryption pubkey. Returns undefined if no verified link exists.
+   * AUDIT-FIX: the synthesized keypair fallback has been REMOVED.
+   * The caller MUST NOT encrypt to an unverified recipient (ARCH-034).
    */
   resolveChannelRecipient(channel: string, channel_id: string): {
     identity_ref: { id: string; signing_pubkey_hash: string; display_name?: string };
@@ -781,12 +779,10 @@ class SimulatedNetwork {
     }
     const senderEntry = this.identities.get(req.from_node_id)!;
 
-    // P6: For channel recipients, the bundle's payload is end-to-end encrypted
-    // to a key the channel recipient can decrypt with. In a real deployment,
-    // this would be a key pre-arranged between the sender and the recipient
-    // (e.g., looked up via P10 identity graph). For the demo, we synthesize a
-    // "channel identity" keypair per (channel, channel_id) — same input always
-    // produces the same keypair so the recipient's email client can decrypt.
+    // P6+P10: For channel recipients, the bundle's payload is end-to-end encrypted
+    // to the recipient's REAL X25519 pubkey, looked up via the IdentityGraph.
+    // AUDIT-FIX: the synthesizeChannelIdentity() fallback has been REMOVED.
+    // If no verified IdentityGraph link exists, dispatch is REFUSED (ARCH-034).
     let recipientEncryptionPubkey: Uint8Array;
     let recipientRef: { id: string; signing_pubkey_hash: string; display_name?: string };
     let recipientDescriptor: string;
@@ -802,22 +798,23 @@ class SimulatedNetwork {
       conversationId = req.conversation_id ?? `conv:${req.from_node_id}:${req.to_node_id}`;
       destinationInput = { node_id: req.to_node_id };
     } else {
-      // P10: Channel recipient. Look up the recipient's real pubkey via the
-      // IdentityGraph. If no verified link exists, fall back to the
-      // synthesized keypair (backward-compat hack; in production, the
-      // dispatcher would refuse to send to an unverified recipient).
+      // P10+AUDIT-FIX: Channel recipient. Look up the recipient's real pubkey via
+      // the IdentityGraph. If no verified link exists, REFUSE to send.
+      // Per ARCH-034: "The caller MUST NOT encrypt to an unverified recipient."
+      // The previous code fell back to synthesizeChannelIdentity() which derived
+      // a deterministic keypair from a public string — NOT real E2E encryption.
+      // That fallback has been removed.
       const resolved = this.resolveChannelRecipient(req.to_channel!.channel, req.to_channel!.channel_id);
-      if (resolved) {
-        recipientEncryptionPubkey = resolved.encryption_pubkey;
-        recipientRef = resolved.identity_ref;
-      } else {
-        const synth = synthesizeChannelIdentity(req.to_channel!.channel, req.to_channel!.channel_id);
-        recipientEncryptionPubkey = synth.pubkey;
-        recipientRef = {
-          id: synth.identity_id,
-          signing_pubkey_hash: synth.signing_pubkey_hash,
+      if (!resolved) {
+        return {
+          status: 'ERROR',
+          error: `No verified identity link for ${req.to_channel!.channel}:${req.to_channel!.channel_id}. ` +
+                 `Per ARCH-034, the dispatcher refuses to encrypt to an unverified recipient. ` +
+                 `Link this channel identity via the Identity Graph first.`,
         };
       }
+      recipientEncryptionPubkey = resolved.encryption_pubkey;
+      recipientRef = resolved.identity_ref;
       recipientDescriptor = `${req.to_channel!.channel}:${req.to_channel!.channel_id}`;
       conversationId = req.conversation_id ?? `conv:${req.from_node_id}:${recipientDescriptor}`;
       destinationInput = {
@@ -1046,25 +1043,49 @@ class SimulatedNetwork {
   async relayForwardProofs(bundle_id: string): Promise<RelayForwardProofView | undefined> {
     const entry = this.dispatchedBundles.get(bundle_id);
     if (!entry) return undefined;
+    // AUDIT-FIX: The original code stored only the original dispatched bundle
+    // (with SENDER_SIGNATURE only). RELAY_FORWARD proofs are added by relays
+    // during forwarding — they're in the RECEIVED bundle, not the dispatched one.
+    // The dispatched bundle's proof chain only has the SENDER_SIGNATURE.
+    // For honest verification, we verify the SENDER_SIGNATURE with full canonical
+    // fields. RELAY_FORWARD proofs from the forwarded bundle aren't available
+    // here — they'd need to be captured from the recipient's inbox.
     const proofs = entry.bundle.proofs ?? [];
 
     const verifiedProofs = proofs.map((p) => {
       let verified = false;
-      // Find the signer's identity to fetch the public key.
       for (const { identity } of this.identities.values()) {
         if (identity.signing_pubkey_hash === p.signer.signing_pubkey_hash) {
           try {
-            verified = verifyProof(
-              p,
-              // For SENDER_SIGNATURE: same fields as in dispatch().
-              // For RELAY_FORWARD: same fields as in tryForward().
-              // We approximate verification by canonical fields; for the demo, we
-              // just check the signature's structure and that the public key matches.
-              p.kind === 'SENDER_SIGNATURE'
-                ? { bundle_id: entry.bundle.bundle_id }
-                : { bundle_id: entry.bundle.bundle_id, ts: p.ts },
-              identity.public_keys.signing_pubkey,
-            );
+            if (p.kind === 'SENDER_SIGNATURE') {
+              // AUDIT-FIX: use full canonical fields, not approximate.
+              verified = verifyProof(p, {
+                bundle_id: entry.bundle.bundle_id,
+                sender_id: entry.bundle.sender.id,
+                sender_signing_pubkey_hash: entry.bundle.sender.signing_pubkey_hash,
+                recipient_kind: entry.bundle.recipient.kind,
+                recipient_descriptor: entry.bundle.recipient.kind === 'IDENTITY'
+                  ? entry.bundle.recipient.ref.id : 'other',
+                conversation_id: entry.bundle.conversation_id,
+                intent_type: entry.bundle.intent.type,
+                priority: entry.bundle.intent.priority,
+                created_at: entry.bundle.created_at,
+                expires_at: entry.bundle.expires_at,
+                algorithm: entry.bundle.encryption_metadata.algorithm,
+                recipient_pubkey_hash: entry.bundle.encryption_metadata.recipient_pubkey_hash,
+                nonce: entry.bundle.encryption_metadata.nonce,
+                additional_data: entry.bundle.encryption_metadata.additional_data,
+                payload_bytes_len: entry.bundle.payload.bytes_len,
+                routing_policy_id: entry.bundle.routing_policy.policy_id,
+                replication_factor: entry.bundle.routing_policy.inline.replication_factor,
+                max_hops: entry.bundle.routing_policy.inline.max_hops,
+                require_e2e: entry.bundle.routing_policy.inline.require_e2e,
+              }, identity.public_keys.signing_pubkey);
+            } else {
+              // RELAY_FORWARD: can't verify without the forwarded bundle's proof chain.
+              // Mark as unverified with a note.
+              verified = false;
+            }
           } catch {
             verified = false;
           }
@@ -1151,31 +1172,11 @@ class SimulatedNetwork {
   }
 }
 
-/**
- * P6: synthesize a deterministic identity keypair for a channel recipient.
- * Same (channel, channel_id) always produces the same keypair, so the
- * recipient's email client can decrypt any bundle sent to that address.
- *
- * NOTE: This is a DEMO mechanism. In production, the sender would look up
- * the recipient's published encryption pubkey via the P10 identity graph.
- */
-function synthesizeChannelIdentity(channel: string, channel_id: string): {
-  identity_id: string;
-  pubkey: Uint8Array;
-  signing_pubkey_hash: string;
-} {
-  const seedStr = `universal-comm-os|${channel}|${channel_id}`;
-  const seedBytes = new TextEncoder().encode(seedStr);
-  // Hash to 32 bytes for use as a NaCl X25519 secret key seed.
-  const seed = sha256(seedBytes);
-  const keypair = nacl.box.keyPair.fromSecretKey(seed);
-  const identity_id = `channel-identity:${channel}:${channel_id}`;
-  return {
-    identity_id,
-    pubkey: keypair.publicKey,
-    signing_pubkey_hash: b64urlEncode(sha256(keypair.publicKey)),
-  };
-}
+// AUDIT-FIX: synthesizeChannelIdentity() has been REMOVED.
+// It derived a deterministic X25519 keypair from a public string (channel_id),
+// which is NOT real E2E encryption — anyone who knows the formula can derive
+// the same keypair and decrypt. Per ARCH-034, the dispatcher now REFUSES to
+// send to unverified recipients instead of falling back to this hack.
 
 export function getNetwork(): SimulatedNetwork {
   if (!_network) {

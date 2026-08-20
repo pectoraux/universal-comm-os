@@ -234,7 +234,9 @@ describe('Architecture (strict): forbidden imports', () => {
 
 describe('Architecture (strict): no fake implementations in core', () => {
   // Forbidden tokens in core/* (Article X).
-  const FORBIDDEN_TOKENS = ['TODO', 'FIXME', 'placeholder', 'fake success', 'hardcoded route'];
+  // AUDIT-FIX: added 'synthesize', 'simulate', 'approximate', 'best-effort guess'
+  // to catch dishonest implementations.
+  const FORBIDDEN_TOKENS = ['TODO', 'FIXME', 'placeholder', 'fake success', 'hardcoded route', 'synthesize', 'simulate', 'approximate', 'best-effort guess'];
 
   it('core/ has no TODO / stub / placeholder / fake', () => {
     const files = listFiles(join(SRC, 'core'), SRC_EXTENSIONS);

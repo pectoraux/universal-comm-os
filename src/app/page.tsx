@@ -396,6 +396,7 @@ export default function Home() {
       <Header />
       <main className="flex-1 container mx-auto px-4 py-6 grid grid-cols-1 lg:grid-cols-3 gap-6">
         <section className="lg:col-span-2 space-y-6">
+          <SimulationDisclaimer />
           <ArchitectureHeader />
           <DispatchComposer
             fromNode={fromNode}
@@ -527,6 +528,26 @@ function Header() {
         </Badge>
       </div>
     </header>
+  );
+}
+
+function SimulationDisclaimer() {
+  return (
+    <div className="rounded-lg border border-amber-700/50 bg-amber-950/20 p-3">
+      <div className="flex items-center gap-2 text-xs uppercase tracking-wider text-amber-400 mb-1">
+        <ShieldCheck className="w-3.5 h-3.5" />
+        Honest Simulation Disclaimer
+      </div>
+      <ul className="text-[10px] text-slate-400 space-y-1 ml-5 list-disc">
+        <li><span className="text-amber-400">Transports:</span> All transports are LoopbackTransport (in-process). No real BLE, Wi-Fi, LAN, or Internet I/O. P4 (Android) is Gemini&apos;s responsibility.</li>
+        <li><span className="text-amber-400">Channel Adapters:</span> Email/SMS/WhatsApp adapters write to in-process transcripts, NOT real SMTP/SMS/WhatsApp APIs. EXPERIMENTAL per Article X.</li>
+        <li><span className="text-amber-400">Delivery States:</span> Channel-recipient bundles stop at EXTERNAL_ACCEPTED, NOT DELIVERED. The recipient must read via the channel&apos;s native client.</li>
+        <li><span className="text-amber-400">Resource Reports:</span> Battery/bandwidth/storage are static snapshots, not live measurements.</li>
+        <li><span className="text-amber-400">Identity Graph:</span> Shared singleton. In production, each node would have its own graph via identity-gossip.</li>
+        <li><span className="text-amber-400">No Synthesized Keys:</span> The synthesizeChannelIdentity() hack has been removed. Channel recipients MUST have a verified IdentityGraph link or dispatch is refused (ARCH-034).</li>
+        <li><span className="text-emerald-400">What IS real:</span> NaCl sealed-box encryption, Ed25519 signatures, delivery state machine, capability gossip, BFS multi-hop routing, persistent Prisma store, TTL sweeper, RELAY_FORWARD proofs, IdentityGraph with signed CHANNEL_OWNERSHIP proofs, auto-decrypt on delivery, AI intent interpretation via z-ai-web-dev-sdk.</li>
+      </ul>
+    </div>
   );
 }
 

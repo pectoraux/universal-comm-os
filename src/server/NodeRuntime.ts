@@ -287,13 +287,12 @@ export function createNodeRuntime(deps: NodeRuntimeDeps): NodeRuntime {
             transport: bundle.recipient.channel,
             note: `external_message_id: ${result.external_message_id ?? 'n/a'}`,
           });
-          // For demo purposes, we also mark DELIVERED when the external channel
-          // accepts (the actual "read" by the recipient happens out-of-band
-          // via the channel's native retrieval, e.g., checking email).
-          tracker.transition(bundle.bundle_id, 'DELIVERED', {
-            node: deps.capabilities.node_id,
-            note: 'external channel accepted; recipient reads via channel',
-          });
+          // AUDIT-FIX: The previous code transitioned to DELIVERED here, but
+          // EXTERNAL_ACCEPTED means "the adapter accepted the bundle" — NOT
+          // "the recipient received it." The recipient reads via the channel's
+          // native retrieval (checking email, SMS inbox, WhatsApp). True
+          // DELIVERED only happens when the recipient actually reads it.
+          // The false DELIVERED has been removed.
         } else {
           tracker.transition(bundle.bundle_id, 'GATEWAY_UNAVAILABLE', {
             node: deps.capabilities.node_id,
