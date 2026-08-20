@@ -29,6 +29,8 @@ import {
   advertiseCapabilities,
   deriveRoles,
   createCapabilityCache,
+  createIdentityGraph,
+  signChannelOwnershipProof,
   type UniversalIdentity,
   type CommunicationBundle,
   type DeliveryRecord,
@@ -37,6 +39,8 @@ import {
   type Proof,
   type CapabilityCache,
   type CapabilityAdvertisement,
+  type IdentityGraph,
+  type LinkedChannelIdentity,
 } from '@/core/index';
 import nacl from 'tweetnacl';
 import { sha256 } from '@noble/hashes/sha2.js';
@@ -136,6 +140,12 @@ class SimulatedNetwork {
   emailTranscript: EmailTranscript = { entries: [] };
   /** P5: periodic gossip timer. */
   gossipTimer: ReturnType<typeof setInterval> | null = null;
+  /**
+   * P10: shared IdentityGraph for the demo. In production, each node has its
+   * own graph (per-node view) populated by an identity-gossip protocol OR a
+   * federated directory. In the demo, all nodes share this singleton.
+   */
+  identityGraph: IdentityGraph = createIdentityGraph();
   /** True = use persistent Prisma store; false = use in-memory store. */
   readonly persistent: boolean;
   readonly sweeper: TtlSweeper;
@@ -171,6 +181,47 @@ class SimulatedNetwork {
     }));
   }
 
+  /**
+   * P10: link a UniversalIdentity to a channel_id via a signed proof.
+   * Called from setup() to pre-link demo nodes; in production this would
+   * be called by the user's client after they complete a channel-ownership
+   * challenge (e.g., clicking a verification link in their email).
+   */
+  linkIdentityToChannel(
+    identity: UniversalIdentity,
+    keypair: { signing_secret_key: Uint8Array; key_set: { signing_pubkey: Uint8Array; encryption_pubkey: Uint8Array } },
+    channel: 'EMAIL' | 'SMS' | 'WHATSAPP' | 'MATRIX' | 'TELEGRAM' | 'INSTAGRAM' | 'MESSENGER' | 'RCS',
+    channel_id: string,
+  ): boolean {
+    const proof = signChannelOwnershipProof({
+      identity_id: identity.id,
+      channel,
+      channel_id,
+      signing_secret_key: keypair.signing_secret_key,
+      signing_pubkey: keypair.key_set.signing_pubkey,
+    });
+    return this.identityGraph.link({ identity, channel, channel_id, proof });
+  }
+
+  /** P10: snapshot of the identity graph (for UI). */
+  identityGraphSnapshot(): LinkedChannelIdentity[] {
+    return this.identityGraph.snapshot();
+  }
+
+  /**
+   * P10: resolve a channel recipient to their real UniversalIdentityRef +
+   * encryption pubkey. Returns undefined if no verified link exists (in
+   * which case the caller falls back to the synthesized keypair — a
+   * backward-compat hack retained for the demo's pre-link bootstrap).
+   */
+  resolveChannelRecipient(channel: string, channel_id: string): {
+    identity_ref: { id: string; signing_pubkey_hash: string; display_name?: string };
+    encryption_pubkey: Uint8Array;
+    proof: any;
+  } | undefined {
+    return this.identityGraph.resolveChannelRecipient(channel as any, channel_id);
+  }
+
   private setup() {
     // Three-loopback-bus fabric:
     //   bus-lan:  Alice <-> Relay <-> Bob (LAN)
@@ -202,6 +253,15 @@ class SimulatedNetwork {
     this.identities.set('bob', { identity: bobId, signing_sk: bobKp.signing_secret_key, encryption_sk: bobKp.encryption_secret_key });
     this.identities.set('relay', { identity: relayId, signing_sk: relayKp.signing_secret_key, encryption_sk: relayKp.encryption_secret_key });
     this.identities.set('gateway', { identity: gatewayId, signing_sk: gatewayKp.signing_secret_key, encryption_sk: gatewayKp.encryption_secret_key });
+
+    // P10: pre-link each demo node's email to their UniversalIdentity via a
+    // signed CHANNEL_OWNERSHIP proof. In production, this would happen via
+    // the user's email client signing a challenge; in the demo, the runtime
+    // has the signing key so it signs directly.
+    this.linkIdentityToChannel(aliceId, aliceKp, 'EMAIL', 'alice@example.com');
+    this.linkIdentityToChannel(bobId, bobKp, 'EMAIL', 'bob@example.com');
+    this.linkIdentityToChannel(relayId, relayKp, 'EMAIL', 'relay@example.com');
+    this.linkIdentityToChannel(gatewayId, gatewayKp, 'EMAIL', 'gateway@example.com');
 
     const aliceCaps = advertiseCapabilities({
       node_id: 'alice',
@@ -381,13 +441,22 @@ class SimulatedNetwork {
       conversationId = req.conversation_id ?? `conv:${req.from_node_id}:${req.to_node_id}`;
       destinationInput = { node_id: req.to_node_id };
     } else {
-      // Channel recipient. Synthesize a deterministic keypair for the channel_id.
-      const synth = synthesizeChannelIdentity(req.to_channel!.channel, req.to_channel!.channel_id);
-      recipientEncryptionPubkey = synth.pubkey;
-      recipientRef = {
-        id: synth.identity_id,
-        signing_pubkey_hash: synth.signing_pubkey_hash,
-      };
+      // P10: Channel recipient. Look up the recipient's real pubkey via the
+      // IdentityGraph. If no verified link exists, fall back to the
+      // synthesized keypair (backward-compat hack; in production, the
+      // dispatcher would refuse to send to an unverified recipient).
+      const resolved = this.resolveChannelRecipient(req.to_channel!.channel, req.to_channel!.channel_id);
+      if (resolved) {
+        recipientEncryptionPubkey = resolved.encryption_pubkey;
+        recipientRef = resolved.identity_ref;
+      } else {
+        const synth = synthesizeChannelIdentity(req.to_channel!.channel, req.to_channel!.channel_id);
+        recipientEncryptionPubkey = synth.pubkey;
+        recipientRef = {
+          id: synth.identity_id,
+          signing_pubkey_hash: synth.signing_pubkey_hash,
+        };
+      }
       recipientDescriptor = `${req.to_channel!.channel}:${req.to_channel!.channel_id}`;
       conversationId = req.conversation_id ?? `conv:${req.from_node_id}:${recipientDescriptor}`;
       destinationInput = {
@@ -688,6 +757,7 @@ class SimulatedNetwork {
     this.dispatchedBundles.clear();
     this.gatewayRuntimes.clear();
     this.emailTranscript = { entries: [] };
+    this.identityGraph.clear();
     // Clear persistent tables too so the demo starts fresh.
     if (this.persistent) {
       await db.storedBundle.deleteMany({});

@@ -89,3 +89,29 @@ export async function gossipNowAction() {
   net.gossipAll();
   return { ok: true };
 }
+
+// P10 additions
+
+export async function getIdentityGraphAction() {
+  const net = getNetwork();
+  return net.identityGraphSnapshot();
+}
+
+export async function linkIdentityToChannelAction(input: {
+  node_id: string;
+  channel: 'EMAIL' | 'SMS' | 'WHATSAPP' | 'MATRIX' | 'TELEGRAM' | 'INSTAGRAM' | 'MESSENGER' | 'RCS';
+  channel_id: string;
+}) {
+  // Look up the node's identity + keypair from the network.
+  // This is a demo-only action — in production, the user's client would
+  // sign the proof locally and submit it to the network.
+  const net = getNetwork();
+  const rt = (net as any).runtimes.get(input.node_id);
+  if (!rt) return { ok: false, error: `unknown node ${input.node_id}` };
+  const identity = rt.identity;
+  const keypair = (net as any).identities.get(input.node_id);
+  if (!keypair) return { ok: false, error: `no keypair for ${input.node_id}` };
+  return {
+    ok: net.linkIdentityToChannel(identity, keypair, input.channel, input.channel_id),
+  };
+}

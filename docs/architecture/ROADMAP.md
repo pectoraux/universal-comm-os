@@ -76,10 +76,14 @@ Implementation sequencing per the master prompt. Vertical from the protocol outw
 - [ ] Cost / latency / reliability / battery / bandwidth / storage / trust / privacy routing weights
 - [ ] Delivery probability estimation
 
-## P10 — Universal Identity Graph
-- [ ] Identity linking protocol
-- [ ] Channel identity verification
-- [ ] Contact resolution + consent + preferences
+## P10 — Universal Identity Graph  (DONE in this iteration)
+- [x] Identity linking protocol: `linkChannelIdentity()` requires a signed `CHANNEL_OWNERSHIP` proof; the verifier checks the signature against the identity's signing pubkey
+- [x] `IdentityGraph` interface in core (in-memory impl; Prisma-backed for production future)
+- [x] `resolveChannelRecipient(channel, channel_id)` returns the linked identity's REAL encryption pubkey (or undefined if no verified link)
+- [x] Replaced the synthesized channel-identity keypair hack (P6) with real graph lookups; backward-compat fallback retained
+- [x] Demo pre-links all 4 nodes' emails; UI shows the graph + a "Link a new identity" form
+- [ ] Consent + preferences (deferred — not needed for the demo's send path)
+- [ ] Federated identity propagation via identity-gossip (deferred — demo uses a shared singleton graph)
 
 ## P11 — Consumer Application
 - [ ] Unified inbox

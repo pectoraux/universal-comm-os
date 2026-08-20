@@ -18,6 +18,7 @@ export * from './identity/types';
 export * from './identity/UniversalIdentity';
 export * from './identity/ChannelIdentity';
 export * from './identity/keys';
+export * from './identity/IdentityGraph';
 
 // Intent
 export * from './intent/types';

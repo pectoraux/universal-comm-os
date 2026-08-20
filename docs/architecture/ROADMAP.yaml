@@ -110,7 +110,7 @@ phases:
 
   - id: P10
     name: Universal Identity Graph
-    status: PENDING
+    status: DONE
     items:
       - identity_linking
       - channel_verification

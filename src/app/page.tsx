@@ -24,6 +24,8 @@ import {
   getEmailTranscriptAction,
   getCapabilityCachesAction,
   gossipNowAction,
+  getIdentityGraphAction,
+  linkIdentityToChannelAction,
 } from '@/app/actions/commos';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
@@ -56,6 +58,8 @@ import {
   GitBranch,
   Layers,
   Server,
+  Users,
+  Link2,
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 
@@ -141,6 +145,7 @@ export default function Home() {
   const [sweeperStatus, setSweeperStatus] = useState<{ running: boolean; last?: { expired_count: number; ts: number } } | null>(null);
   const [emailTranscript, setEmailTranscript] = useState<Array<{ message_id: string; to: string; from: string; subject: string; body: string; sent_at: number; bundle_id: string }>>([]);
   const [capabilityCaches, setCapabilityCaches] = useState<Array<{ node_id: string; entries: Array<any> }>>([]);
+  const [identityGraph, setIdentityGraph] = useState<Array<any>>([]);
 
   const [fromNode, setFromNode] = useState('alice');
   const [toNode, setToNode] = useState('bob');
@@ -153,7 +158,7 @@ export default function Home() {
   const [replicate, setReplicate] = useState(false);
 
   const refresh = useCallback(async () => {
-    const [n, ns, dl, q, ss, et, cc] = await Promise.all([
+    const [n, ns, dl, q, ss, et, cc, ig] = await Promise.all([
       getNetworkStateAction(),
       listNodesAction(),
       getDeliverySnapshotsAction(),
@@ -161,17 +166,18 @@ export default function Home() {
       getSweeperStatusAction(),
       getEmailTranscriptAction(),
       getCapabilityCachesAction(),
+      getIdentityGraphAction(),
     ]);
     // Defer state updates out of the effect-render cycle to avoid cascading renders.
     setTimeout(() => {
       setNetwork(n);
       setNodes(ns as NodeDescriptor[]);
-      // deliverySnapshots returns a Promise (P3: now async because Prisma-backed).
       Promise.resolve(dl).then((d) => setDelivery(d));
       Promise.resolve(q).then((qq) => setQueues(qq));
       setSweeperStatus(ss as any);
       setEmailTranscript(et as any);
       setCapabilityCaches(cc as any);
+      setIdentityGraph(ig as any);
     }, 0);
   }, []);
 
@@ -272,6 +278,16 @@ export default function Home() {
     await refresh();
   }, [toast, refresh]);
 
+  const onLinkIdentity = useCallback(async (node_id: string, channel_id: string) => {
+    const res = await linkIdentityToChannelAction({ node_id, channel: 'EMAIL', channel_id });
+    if (res.ok) {
+      toast({ title: `Identity linked`, description: `${node_id} now owns ${channel_id} (signed CHANNEL_OWNERSHIP proof).` });
+    } else {
+      toast({ title: `Link failed`, description: res.error, variant: 'destructive' });
+    }
+    await refresh();
+  }, [toast, refresh]);
+
   const onReset = useCallback(async () => {
     await resetNetworkAction();
     setSelectedBundleId(null);
@@ -311,6 +327,7 @@ export default function Home() {
           />
           <NetworkTopology network={network} nodes={nodes} />
           <CapabilityCacheCard caches={capabilityCaches} onGossipNow={onGossipNow} />
+          <IdentityGraphCard graph={identityGraph} nodes={nodes} onLinkIdentity={onLinkIdentity} />
           <DtnStatusCard sweeperStatus={sweeperStatus} onSweepOnce={onSweepOnce} queues={queues} />
           <EmailTranscriptCard transcript={emailTranscript} />
           <DeliveryTimeline
@@ -353,7 +370,7 @@ function Header() {
           </div>
         </div>
         <Badge variant="outline" className="border-emerald-500 text-emerald-400">
-          P0 · P1 · P2 · P3 · P5 · P6 live
+          P0 · P1 · P2 · P3 · P5 · P6 · P10 live
         </Badge>
       </div>
     </header>
@@ -688,6 +705,109 @@ function CapabilityCacheCard({
             ))}
           </div>
         )}
+      </CardContent>
+    </Card>
+  );
+}
+
+function IdentityGraphCard({
+  graph,
+  nodes,
+  onLinkIdentity,
+}: {
+  graph: Array<any>;
+  nodes: NodeDescriptor[];
+  onLinkIdentity: (node_id: string, channel_id: string) => void;
+}) {
+  const [linkNodeId, setLinkNodeId] = useState('alice');
+  const [linkEmail, setLinkEmail] = useState('alice@personal.example');
+
+  return (
+    <Card className="bg-slate-900/70 border-slate-800">
+      <CardHeader>
+        <CardTitle className="flex items-center gap-2 text-base">
+          <Users className="w-4 h-4 text-emerald-400" />
+          Identity Graph (P10 — channel → UniversalIdentity)
+        </CardTitle>
+        <CardDescription className="text-slate-400">
+          Each linked channel identity is bound to a UniversalIdentity via a signed <code>CHANNEL_OWNERSHIP</code> proof. Senders resolve the recipient&apos;s real pubkey via the graph — no more synthesized keys.
+        </CardDescription>
+      </CardHeader>
+      <CardContent className="space-y-4">
+        {graph.length === 0 ? (
+          <div className="text-sm text-slate-500 italic">No identities linked yet.</div>
+        ) : (
+          <div className="space-y-2">
+            {graph.map((entry) => (
+              <div key={`${entry.channel}:${entry.channel_id}`} className="rounded-lg border border-slate-800 bg-slate-950/50 p-3">
+                <div className="flex items-center justify-between mb-1">
+                  <div className="flex items-center gap-2">
+                    <Badge variant="outline" className="border-emerald-500 text-emerald-400 text-[10px] font-mono">
+                      <Link2 className="w-2.5 h-2.5 mr-1" />
+                      {entry.channel}:{entry.channel_id}
+                    </Badge>
+                    <span className="text-[10px] text-slate-500">→</span>
+                    <Badge variant="outline" className="border-cyan-500 text-cyan-400 text-[10px] font-mono">
+                      {entry.identity_ref.display_name ?? entry.identity_ref.id.slice(0, 12)}
+                    </Badge>
+                  </div>
+                  <Badge variant="outline" className="border-emerald-500 text-emerald-400 text-[10px]">
+                    <ShieldCheck className="w-2.5 h-2.5 mr-1" />
+                    {entry.verification}
+                  </Badge>
+                </div>
+                <div className="text-[10px] font-mono text-slate-500 space-y-0.5">
+                  <div>identity_id: <span className="text-slate-400">{entry.identity_ref.id.slice(0, 24)}…</span></div>
+                  <div>signing_pubkey_hash: <span className="text-slate-400">{entry.identity_ref.signing_pubkey_hash.slice(0, 16)}…</span></div>
+                  <div>linked_at: <span className="text-slate-400">{new Date(entry.linked_at).toLocaleString()}</span></div>
+                  <div>proof.ts: <span className="text-slate-400">{new Date(entry.proof.ts).toLocaleString()}</span></div>
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+
+        <Separator className="bg-slate-800" />
+
+        <div className="space-y-2">
+          <div className="text-xs uppercase tracking-wider text-slate-400">Link a new identity (demo)</div>
+          <div className="grid grid-cols-1 md:grid-cols-[1fr_2fr_auto] gap-2 items-end">
+            <div>
+              <Label className="text-[10px] text-slate-500">Node</Label>
+              <Select value={linkNodeId} onValueChange={setLinkNodeId}>
+                <SelectTrigger className="h-8 text-xs">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  {nodes.map((n) => (
+                    <SelectItem key={n.node_id} value={n.node_id}>{n.display_name}</SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+            <div>
+              <Label className="text-[10px] text-slate-500">Email</Label>
+              <input
+                type="email"
+                value={linkEmail}
+                onChange={(e) => setLinkEmail(e.target.value)}
+                placeholder="user@example.com"
+                className="w-full h-8 rounded-md border border-slate-700 bg-slate-950 px-2 text-xs font-mono text-slate-200 focus:outline-none focus:ring-1 focus:ring-emerald-500"
+              />
+            </div>
+            <Button
+              size="sm"
+              variant="outline"
+              onClick={() => onLinkIdentity(linkNodeId, linkEmail)}
+              className="border-emerald-600 text-emerald-400 hover:bg-emerald-950 h-8"
+            >
+              <Link2 className="w-3 h-3 mr-1" /> Link
+            </Button>
+          </div>
+          <p className="text-[10px] text-slate-500">
+            In production, the user&apos;s email client signs the proof locally. The demo signs it using the node&apos;s signing key (the runtime has the key).
+          </p>
+        </div>
       </CardContent>
     </Card>
   );
@@ -1131,7 +1251,7 @@ function RoadmapCard() {
     { id: 'P7', name: 'Matrix Fabric', status: 'PENDING' },
     { id: 'P8', name: 'External Channels', status: 'PENDING' },
     { id: 'P9', name: 'Intelligent Routing', status: 'PENDING' },
-    { id: 'P10', name: 'Universal Identity Graph', status: 'PENDING' },
+    { id: 'P10', name: 'Universal Identity Graph', status: 'DONE' },
     { id: 'P11', name: 'Consumer Application', status: 'PENDING' },
     { id: 'P12', name: 'Business Platform', status: 'PENDING' },
     { id: 'P13', name: 'Community Network', status: 'PENDING' },
@@ -1207,7 +1327,7 @@ function Footer({ onReset }: { onReset: () => void }) {
     <footer className="mt-auto border-t border-slate-800 bg-slate-900/50">
       <div className="container mx-auto px-4 py-3 flex items-center justify-between">
         <div className="text-[10px] text-slate-500 font-mono">
-          bundle → transport → destination (no Internet required) · ARCH-001..031 · tested in CI
+          bundle → transport → destination (no Internet required) · ARCH-001..034 · tested in CI
         </div>
         <Button size="sm" variant="outline" onClick={onReset} className="border-slate-700 text-slate-400 hover:bg-slate-800 text-xs">
           Reset Network
