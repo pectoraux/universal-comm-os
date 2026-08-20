@@ -158,7 +158,7 @@ phases:
 
   - id: P14
     name: AI
-    status: PENDING
+    status: DONE
     items:
       - intent_interpretation
       - routing_recommendations

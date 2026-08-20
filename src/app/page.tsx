@@ -31,6 +31,8 @@ import {
   getAnalyticsAction,
   getRoutingPolicyAction,
   updateRoutingPolicyAction,
+  aiInterpretIntentAction,
+  aiSummarizeConversationAction,
 } from '@/app/actions/commos';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
@@ -69,6 +71,7 @@ import {
   Mail,
   BarChart3,
   Sliders,
+  Sparkles,
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 
@@ -159,6 +162,8 @@ export default function Home() {
   const [inboxNode, setInboxNode] = useState('bob');
   const [analytics, setAnalytics] = useState<any>(null);
   const [routingPolicy, setRoutingPolicy] = useState<any>(null);
+  const [aiSuggestion, setAiSuggestion] = useState<{ ok: boolean; suggestion?: any; reasoning?: string; error?: string } | null>(null);
+  const [aiSummary, setAiSummary] = useState<{ conversation_id: string; summary: string } | null>(null);
 
   const [fromNode, setFromNode] = useState('alice');
   const [toNode, setToNode] = useState('bob');
@@ -320,6 +325,49 @@ export default function Home() {
     await refresh();
   }, [toast, refresh]);
 
+  // P14: AI-assistive features (not authoritative — the user confirms)
+  const onAiInterpretIntent = useCallback(async () => {
+    setAiSuggestion({ ok: false } as any); // loading
+    const res = await aiInterpretIntentAction(plaintext);
+    setAiSuggestion(res);
+    if (res.ok && res.suggestion) {
+      toast({
+        title: `AI suggests: ${res.suggestion.type}`,
+        description: res.suggestion.reasoning ?? 'Review the suggestion and accept to apply.',
+      });
+    } else {
+      toast({ title: `AI interpretation failed`, description: res.error, variant: 'destructive' });
+    }
+  }, [plaintext, toast]);
+
+  const onAcceptAiSuggestion = useCallback(() => {
+    if (!aiSuggestion?.suggestion) return;
+    const s = aiSuggestion.suggestion;
+    if (s.type) setIntentType(s.type);
+    if (s.priority) setPriority(s.priority);
+    toast({ title: `AI suggestion applied`, description: `Intent: ${s.type}, Priority: ${s.priority}` });
+    setAiSuggestion(null);
+  }, [aiSuggestion, toast]);
+
+  const onAiSummarize = useCallback(async (conversation_id: string) => {
+    const conv = inbox.find((c) => c.conversation_id === conversation_id);
+    if (!conv || conv.messages.length === 0) return;
+    setAiSummary({ conversation_id, summary: 'Summarizing...' });
+    const messages = conv.messages.map((m: any) => ({
+      sender: m.sender?.display_name ?? m.sender?.id?.slice(0, 8) ?? 'unknown',
+      plaintext: m.plaintext,
+      received_at: m.received_at,
+    }));
+    const res = await aiSummarizeConversationAction(messages);
+    if (res.ok) {
+      setAiSummary({ conversation_id, summary: res.summary });
+      toast({ title: `AI summary generated` });
+    } else {
+      setAiSummary(null);
+      toast({ title: `AI summary failed`, description: res.error, variant: 'destructive' });
+    }
+  }, [inbox, toast]);
+
   const onReset = useCallback(async () => {
     await resetNetworkAction();
     setSelectedBundleId(null);
@@ -357,6 +405,54 @@ export default function Home() {
             onDispatch={onDispatch}
             lastDispatch={lastDispatch}
           />
+          {/* P14: AI assistive layer — interprets intent, summarizes conversations */}
+          {aiSuggestion && (
+            <div className="rounded-lg border border-purple-700/50 bg-purple-950/20 p-3 space-y-2">
+              <div className="flex items-center gap-2 text-xs uppercase tracking-wider text-purple-400">
+                <Sparkles className="w-3.5 h-3.5" />
+                AI Intent Suggestion (P14 — assistive, not authoritative)
+              </div>
+              {aiSuggestion.ok && aiSuggestion.suggestion ? (
+                <div className="space-y-2">
+                  <div className="grid grid-cols-2 md:grid-cols-4 gap-2 text-xs font-mono">
+                    <div><span className="text-slate-500">Type:</span> <span className="text-purple-300">{aiSuggestion.suggestion.type}</span></div>
+                    <div><span className="text-slate-500">Priority:</span> <span className="text-purple-300">{aiSuggestion.suggestion.priority}</span></div>
+                    <div><span className="text-slate-500">TTL:</span> <span className="text-purple-300">{aiSuggestion.suggestion.ttl_ms}ms</span></div>
+                    <div><span className="text-slate-500">Privacy:</span> <span className="text-purple-300">{aiSuggestion.suggestion.min_privacy}</span></div>
+                  </div>
+                  {aiSuggestion.suggestion.reasoning && (
+                    <p className="text-xs text-slate-400 italic">{aiSuggestion.suggestion.reasoning}</p>
+                  )}
+                  <div className="flex gap-2">
+                    <Button size="sm" variant="outline" onClick={onAcceptAiSuggestion} className="border-purple-600 text-purple-300 hover:bg-purple-950 h-7 text-xs">
+                      <CheckCircle2 className="w-3 h-3 mr-1" /> Accept suggestion
+                    </Button>
+                    <Button size="sm" variant="outline" onClick={() => setAiSuggestion(null)} className="border-slate-600 text-slate-400 hover:bg-slate-800 h-7 text-xs">
+                      Dismiss
+                    </Button>
+                  </div>
+                </div>
+              ) : !aiSuggestion.ok && !aiSuggestion.suggestion ? (
+                <div className="text-xs text-slate-500">Analyzing message...</div>
+              ) : (
+                <div className="text-xs text-red-400">{aiSuggestion.error}</div>
+              )}
+            </div>
+          )}
+          <div className="flex items-center gap-2">
+            <Button
+              size="sm"
+              variant="outline"
+              onClick={onAiInterpretIntent}
+              className="border-purple-600 text-purple-300 hover:bg-purple-950"
+            >
+              <Sparkles className="w-3.5 h-3.5 mr-1.5" />
+              AI Interpret Intent (P14)
+            </Button>
+            <span className="text-[10px] text-slate-500">
+              The LLM analyzes your message and suggests a structured Intent. You confirm before dispatch — AI never governs routing, crypto, or delivery.
+            </span>
+          </div>
           <NetworkTopology network={network} nodes={nodes} />
           <CapabilityCacheCard caches={capabilityCaches} onGossipNow={onGossipNow} />
           <IdentityGraphCard graph={identityGraph} nodes={nodes} onLinkIdentity={onLinkIdentity} />
@@ -368,6 +464,8 @@ export default function Home() {
             setInboxNode={setInboxNode}
             nodes={nodes}
             onMarkRead={onMarkConversationRead}
+            aiSummary={aiSummary}
+            onAiSummarize={onAiSummarize}
           />
           <AnalyticsCard analytics={analytics} />
           <RoutingPolicyCard policy={routingPolicy} onUpdate={onUpdatePolicy} />
@@ -411,7 +509,7 @@ function Header() {
           </div>
         </div>
         <Badge variant="outline" className="border-emerald-500 text-emerald-400">
-          P0 · P1 · P2 · P3 · P5 · P6 · P9 · P10 · P11 · P12 live
+          P0 · P1 · P2 · P3 · P5 · P6 · P9 · P10 · P11 · P12 · P14 live
         </Badge>
       </div>
     </header>
@@ -1063,12 +1161,16 @@ function InboxCard({
   setInboxNode,
   nodes,
   onMarkRead,
+  aiSummary,
+  onAiSummarize,
 }: {
   inbox: Array<{ conversation_id: string; messages: Array<any>; unread_count: number }>;
   inboxNode: string;
   setInboxNode: (s: string) => void;
   nodes: NodeDescriptor[];
   onMarkRead: (conversation_id: string) => void;
+  aiSummary: { conversation_id: string; summary: string } | null;
+  onAiSummarize: (conversation_id: string) => void;
 }) {
   const [expandedConv, setExpandedConv] = useState<string | null>(null);
 
@@ -1156,6 +1258,20 @@ function InboxCard({
                         >
                           <CheckCircle2 className="w-3 h-3 mr-1" /> Mark conversation as read
                         </Button>
+                      )}
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        onClick={() => onAiSummarize(conv.conversation_id)}
+                        className="border-purple-600 text-purple-300 hover:bg-purple-950 h-7 text-xs"
+                      >
+                        <Sparkles className="w-3 h-3 mr-1" /> AI Summarize (P14)
+                      </Button>
+                      {aiSummary && aiSummary.conversation_id === conv.conversation_id && (
+                        <div className="rounded border border-purple-800/50 bg-purple-950/20 p-2">
+                          <div className="text-[10px] uppercase tracking-wider text-purple-400 mb-1">AI Summary</div>
+                          <p className="text-xs text-slate-300">{aiSummary.summary}</p>
+                        </div>
                       )}
                     </div>
                   )}
@@ -1578,7 +1694,7 @@ function RoadmapCard() {
     { id: 'P11', name: 'Consumer Application', status: 'DONE' },
     { id: 'P12', name: 'Business Platform', status: 'DONE' },
     { id: 'P13', name: 'Community Network', status: 'PENDING' },
-    { id: 'P14', name: 'AI', status: 'PENDING' },
+    { id: 'P14', name: 'AI', status: 'DONE' },
   ];
   return (
     <Card className="bg-slate-900/70 border-slate-800">
@@ -1650,7 +1766,7 @@ function Footer({ onReset }: { onReset: () => void }) {
     <footer className="mt-auto border-t border-slate-800 bg-slate-900/50">
       <div className="container mx-auto px-4 py-3 flex items-center justify-between">
         <div className="text-[10px] text-slate-500 font-mono">
-          bundle → transport → destination (no Internet required) · ARCH-001..042 · tested in CI
+          bundle → transport → destination (no Internet required) · ARCH-001..044 · tested in CI
         </div>
         <Button size="sm" variant="outline" onClick={onReset} className="border-slate-700 text-slate-400 hover:bg-slate-800 text-xs">
           Reset Network

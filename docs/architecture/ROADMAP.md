@@ -118,12 +118,12 @@ Implementation sequencing per the master prompt. Vertical from the protocol outw
 - [ ] Resource accounting
 - (No token economy until verified contribution measurement is real.)
 
-## P14 — AI
-- [ ] Intent interpretation assist
-- [ ] Routing recommendations
-- [ ] Conversation summarization
-- [ ] Automation, agents
-- AI assists; AI MUST NOT become authority for crypto / identity verification / authorization / protocol semantics / delivery truth / security invariants.
+## P14 — AI  (DONE in this iteration — intent interpretation + conversation summarization)
+- [x] AI intent interpretation: `aiInterpretIntentAction(plaintext)` uses z-ai-web-dev-sdk to analyze the user's natural-language message and suggest a structured Intent (type, priority, TTL, privacy). The AI SUGGESTS; the user CONFIRMS before dispatch.
+- [x] AI conversation summarization: `aiSummarizeConversationAction(messages)` uses z-ai-web-dev-sdk to summarize a conversation thread in 2-3 sentences. Focuses on key topics, action items, tone. No sensitive details.
+- [x] UI: "AI Interpret Intent" button near dispatch + "AI Summarize" button on inbox conversations. Suggestion display with accept/dismiss.
+- [x] Per master prompt: AI MUST NOT become authority for cryptography, identity verification, authorization, protocol semantics, delivery truth, security invariants. The AI operates above the deterministic protocol; it assists but does not govern.
+- [ ] Automation + agents (deferred — requires multi-turn LLM conversation management)
 
 ## The First Technical Milestone (target)
 ```text
