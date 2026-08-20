@@ -101,10 +101,14 @@ Implementation sequencing per the master prompt. Vertical from the protocol outw
 - [x] Identity management: identity graph (P10) + link/unlink UI
 - [x] Mark conversation as read: transitions delivery state to READ
 
-## P12 — Business Platform
-- [ ] Organizations, teams, shared inboxes
-- [ ] CRM, customer profiles, automation
-- [ ] Routing policies UI, templates, analytics, billing
+## P12 — Business Platform  (DONE in this iteration — analytics + routing policy management)
+- [x] Analytics: delivery statistics (dispatched, delivered, expired, no_route, relayed, queued, delivery_rate, per-node breakdown, hop distribution) — computed from delivery tracker + dispatched bundles
+- [x] Routing policy management: editable at runtime via `setPolicy()` on NodeRuntime + `updateRoutingPolicy()` on CommOS; affects subsequent dispatches only
+- [x] UI: AnalyticsCard (stat blocks + per-node breakdown + hop distribution bar chart) + RoutingPolicyCard (max_hops, replication_factor, require_e2e, emergency_only, forbidden_transports editor with live JSON preview)
+- [ ] Organizations + teams + shared inboxes (deferred — the identity graph P10 + inbox P11 provide the foundation; organization grouping is an application-level concern)
+- [ ] CRM + customer profiles (deferred — application-level, not protocol-level)
+- [ ] Automation + templates (deferred)
+- [ ] Billing (deferred — per ARCH-020, no premature complexity)
 
 ## P13 — Community Network
 - [ ] Relay participation

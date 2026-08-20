@@ -139,6 +139,9 @@ export interface NodeRuntime {
 
   /** P5: snapshot of this node's capability cache (gossiped view). */
   capabilityCacheSnapshot(): CapabilityAdvertisement[];
+
+  /** P12: update the routing policy at runtime (affects subsequent dispatches). */
+  setPolicy(policy: RoutingPolicy): void;
 }
 
 export interface DispatchInput {
@@ -163,8 +166,8 @@ export interface DispatchResult {
 
 export function createNodeRuntime(deps: NodeRuntimeDeps): NodeRuntime {
   const tracker = createDeliveryTracker();
-  const policy = deps.routing_policy ?? defaultPolicy;
-  const route = createRouter(policy);
+  let policy = deps.routing_policy ?? defaultPolicy;
+  let route = createRouter(policy);
 
   for (const t of deps.transports) {
     t.onReceive((bundle, from) => {
@@ -534,6 +537,10 @@ export function createNodeRuntime(deps: NodeRuntimeDeps): NodeRuntime {
     gossipCapabilities,
     capabilityCacheSnapshot() {
       return deps.capabilityCache?.snapshot() ?? [];
+    },
+    setPolicy(p: RoutingPolicy) {
+      policy = p;
+      route = createRouter(p);
     },
   };
 }

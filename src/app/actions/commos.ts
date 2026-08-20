@@ -124,3 +124,20 @@ export async function markConversationReadAction(node_id: string, conversation_i
   const net = getNetwork();
   return net.markConversationRead(node_id, conversation_id);
 }
+
+// P12 additions
+
+export async function getAnalyticsAction() {
+  const net = getNetwork();
+  return net.getAnalytics();
+}
+
+export async function getRoutingPolicyAction() {
+  const net = getNetwork();
+  return net.getRoutingPolicy();
+}
+
+export async function updateRoutingPolicyAction(updates: Record<string, any>) {
+  const net = getNetwork();
+  return net.updateRoutingPolicy(updates as any);
+}

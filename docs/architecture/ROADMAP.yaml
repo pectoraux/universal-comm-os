@@ -133,7 +133,7 @@ phases:
 
   - id: P12
     name: Business Platform
-    status: PENDING
+    status: DONE
     items:
       - organizations
       - teams

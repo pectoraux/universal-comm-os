@@ -44,6 +44,8 @@ Numbered architectural decisions. Append-only. Each entry: ID, decision, rationa
 | ARCH-038 | Recipient inbox (P11): when a bundle reaches DELIVERED at a node, CommOS auto-decrypts it using the node's X25519 secret key and stores it in a per-node inbox. The inbox is the user-facing view of received messages — the consumer application's unified inbox. | ACTIVE  |
 | ARCH-039 | Auto-decrypt on delivery (P11): the `onDelivered` callback in NodeRuntimeDeps fires when a bundle transitions to DELIVERED. CommOS registers this callback for each node; it decrypts the bundle (if the node is the recipient identity) and adds the plaintext to the inbox. No manual "Try Decrypt" needed — the inbox is always populated. | ACTIVE  |
 | ARCH-040 | Conversation grouping (P11): the inbox groups messages by `conversation_id`. Each conversation shows: message count, unread count, last message preview. Expanding a conversation shows the full thread (sender, timestamp, delivery state, plaintext). Marking a conversation as read transitions all its bundles to READ in the delivery state machine. | ACTIVE  |
+| ARCH-041 | Analytics (P12): delivery statistics are computed from the delivery tracker + dispatched bundles. Per THREAT_MODEL §11: observability MUST NOT expose private message contents — only aggregate counts (dispatched, delivered, expired, no_route, relayed, queued, delivery_rate, per-node breakdown, hop distribution). | ACTIVE  |
+| ARCH-042 | Routing policy management (P12): the active routing policy is editable at runtime via `setPolicy()` on NodeRuntime + `updateRoutingPolicy()` on CommOS. Changes affect subsequent dispatches only — existing bundles keep their original routing_policy inline (immutable per ARCH-003). | ACTIVE  |
 
 ---
 

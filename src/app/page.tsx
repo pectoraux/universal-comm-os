@@ -28,6 +28,9 @@ import {
   linkIdentityToChannelAction,
   getInboxAction,
   markConversationReadAction,
+  getAnalyticsAction,
+  getRoutingPolicyAction,
+  updateRoutingPolicyAction,
 } from '@/app/actions/commos';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
@@ -64,6 +67,8 @@ import {
   Link2,
   Inbox,
   Mail,
+  BarChart3,
+  Sliders,
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 
@@ -152,6 +157,8 @@ export default function Home() {
   const [identityGraph, setIdentityGraph] = useState<Array<any>>([]);
   const [inbox, setInbox] = useState<Array<{ conversation_id: string; messages: Array<any>; unread_count: number }>>([]);
   const [inboxNode, setInboxNode] = useState('bob');
+  const [analytics, setAnalytics] = useState<any>(null);
+  const [routingPolicy, setRoutingPolicy] = useState<any>(null);
 
   const [fromNode, setFromNode] = useState('alice');
   const [toNode, setToNode] = useState('bob');
@@ -164,7 +171,7 @@ export default function Home() {
   const [replicate, setReplicate] = useState(false);
 
   const refresh = useCallback(async () => {
-    const [n, ns, dl, q, ss, et, cc, ig, ib] = await Promise.all([
+    const [n, ns, dl, q, ss, et, cc, ig, ib, an, rp] = await Promise.all([
       getNetworkStateAction(),
       listNodesAction(),
       getDeliverySnapshotsAction(),
@@ -174,8 +181,9 @@ export default function Home() {
       getCapabilityCachesAction(),
       getIdentityGraphAction(),
       getInboxAction(inboxNode),
+      getAnalyticsAction(),
+      getRoutingPolicyAction(),
     ]);
-    // Defer state updates out of the effect-render cycle to avoid cascading renders.
     setTimeout(() => {
       setNetwork(n);
       setNodes(ns as NodeDescriptor[]);
@@ -186,6 +194,8 @@ export default function Home() {
       setCapabilityCaches(cc as any);
       setIdentityGraph(ig as any);
       Promise.resolve(ib).then((i) => setInbox(i as any));
+      Promise.resolve(an).then((a) => setAnalytics(a));
+      Promise.resolve(rp).then((p) => setRoutingPolicy(p));
     }, 0);
   }, [inboxNode]);
 
@@ -304,6 +314,12 @@ export default function Home() {
     await refresh();
   }, [inboxNode, toast, refresh]);
 
+  const onUpdatePolicy = useCallback(async (updates: Record<string, any>) => {
+    const res = await updateRoutingPolicyAction(updates);
+    toast({ title: `Routing policy updated`, description: `Changes affect subsequent dispatches only.` });
+    await refresh();
+  }, [toast, refresh]);
+
   const onReset = useCallback(async () => {
     await resetNetworkAction();
     setSelectedBundleId(null);
@@ -353,6 +369,8 @@ export default function Home() {
             nodes={nodes}
             onMarkRead={onMarkConversationRead}
           />
+          <AnalyticsCard analytics={analytics} />
+          <RoutingPolicyCard policy={routingPolicy} onUpdate={onUpdatePolicy} />
           <DeliveryTimeline
             delivery={delivery}
             queues={queues}
@@ -393,7 +411,7 @@ function Header() {
           </div>
         </div>
         <Badge variant="outline" className="border-emerald-500 text-emerald-400">
-          P0 · P1 · P2 · P3 · P5 · P6 · P9 · P10 · P11 live
+          P0 · P1 · P2 · P3 · P5 · P6 · P9 · P10 · P11 · P12 live
         </Badge>
       </div>
     </header>
@@ -1157,6 +1175,170 @@ function InboxCard({
   );
 }
 
+function AnalyticsCard({ analytics }: { analytics: any }) {
+  if (!analytics) return null;
+  return (
+    <Card className="bg-slate-900/70 border-slate-800">
+      <CardHeader>
+        <CardTitle className="flex items-center gap-2 text-base">
+          <BarChart3 className="w-4 h-4 text-cyan-400" />
+          Delivery Analytics (P12 — Business Platform)
+        </CardTitle>
+        <CardDescription className="text-slate-400">
+          Aggregate delivery statistics. Per THREAT_MODEL §11: no private message contents — only counts.
+        </CardDescription>
+      </CardHeader>
+      <CardContent className="space-y-4">
+        <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+          <StatBlock label="Dispatched" value={String(analytics.total_dispatched)} color="cyan" />
+          <StatBlock label="Delivered" value={String(analytics.total_delivered)} color="emerald" />
+          <StatBlock label="Relayed" value={String(analytics.total_relayed)} color="amber" />
+          <StatBlock label="Expired" value={String(analytics.total_expired)} color="purple" />
+        </div>
+        <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+          <StatBlock label="No Route" value={String(analytics.total_no_route)} color="slate" />
+          <StatBlock label="Queued" value={String(analytics.total_queued)} color="amber" />
+          <StatBlock label="Delivery Rate" value={`${(analytics.delivery_rate * 100).toFixed(1)}%`} color="emerald" />
+          <StatBlock label="Total Bundles" value={String(analytics.total_dispatched + analytics.total_relayed)} color="cyan" />
+        </div>
+
+        {analytics.per_node && analytics.per_node.length > 0 && (
+          <div>
+            <div className="text-xs uppercase tracking-wider text-slate-400 mb-2">Per-Node Breakdown</div>
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
+              {analytics.per_node.map((pn: any) => (
+                <div key={pn.node_id} className="rounded border border-slate-800 bg-slate-950/50 p-2 text-xs font-mono">
+                  <div className="flex items-center justify-between">
+                    <Badge variant="outline" className="border-slate-700 text-slate-400 text-[9px]">{pn.node_id}</Badge>
+                    <span className="text-slate-500">
+                      D:{pn.delivered} R:{pn.relayed} E:{pn.expired} NR:{pn.no_route} Q:{pn.queued}
+                    </span>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {analytics.route_stats && Object.keys(analytics.route_stats.hop_distribution || {}).length > 0 && (
+          <div>
+            <div className="text-xs uppercase tracking-wider text-slate-400 mb-2">Hop Distribution</div>
+            <div className="flex gap-2 items-end h-16">
+              {Object.entries(analytics.route_stats.hop_distribution).map(([hops, count]) => (
+                <div key={hops} className="flex flex-col items-center gap-1">
+                  <div className="text-[10px] text-slate-400 font-mono">{String(count)}</div>
+                  <div
+                    className="w-8 rounded-t bg-cyan-600"
+                    style={{ height: `${(Number(count) / Math.max(...Object.values(analytics.route_stats.hop_distribution as Record<string, number>))) * 40}px` }}
+                  />
+                  <div className="text-[10px] text-slate-500 font-mono">{hops}h</div>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+      </CardContent>
+    </Card>
+  );
+}
+
+function RoutingPolicyCard({
+  policy,
+  onUpdate,
+}: {
+  policy: any;
+  onUpdate: (updates: Record<string, any>) => void;
+}) {
+  if (!policy) return null;
+  return (
+    <Card className="bg-slate-900/70 border-slate-800">
+      <CardHeader>
+        <CardTitle className="flex items-center gap-2 text-base">
+          <Sliders className="w-4 h-4 text-amber-400" />
+          Routing Policy (P12 — Business Governance)
+        </CardTitle>
+        <CardDescription className="text-slate-400">
+          Editable routing policy. Changes affect subsequent dispatches only — existing bundles keep their original policy (immutable per ARCH-003).
+        </CardDescription>
+      </CardHeader>
+      <CardContent className="space-y-4">
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+          <div className="space-y-2">
+            <Label className="text-xs uppercase tracking-wider text-slate-400">Max Hops</Label>
+            <div className="flex items-center gap-2">
+              <input
+                type="number"
+                min={1}
+                max={10}
+                value={policy.max_hops}
+                onChange={(e) => onUpdate({ max_hops: parseInt(e.target.value) || 4 })}
+                className="w-20 h-8 rounded-md border border-slate-700 bg-slate-950 px-2 text-sm font-mono text-slate-200 focus:outline-none focus:ring-1 focus:ring-amber-500"
+              />
+              <span className="text-[10px] text-slate-500">Max relay hops before NO_ROUTE</span>
+            </div>
+          </div>
+          <div className="space-y-2">
+            <Label className="text-xs uppercase tracking-wider text-slate-400">Replication Factor</Label>
+            <div className="flex items-center gap-2">
+              <input
+                type="number"
+                min={1}
+                max={10}
+                value={policy.replication_factor}
+                onChange={(e) => onUpdate({ replication_factor: parseInt(e.target.value) || 1 })}
+                className="w-20 h-8 rounded-md border border-slate-700 bg-slate-950 px-2 text-sm font-mono text-slate-200 focus:outline-none focus:ring-1 focus:ring-amber-500"
+              />
+              <span className="text-[10px] text-slate-500">N peers per replicated dispatch</span>
+            </div>
+          </div>
+        </div>
+
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+          <div className="space-y-2">
+            <Label className="text-xs uppercase tracking-wider text-slate-400">Require E2E Encryption</Label>
+            <div className="flex items-center gap-2">
+              <Switch
+                checked={policy.require_e2e}
+                onCheckedChange={(v) => onUpdate({ require_e2e: v })}
+              />
+              <span className="text-[10px] text-slate-500">Refuse to send if e2e not possible</span>
+            </div>
+          </div>
+          <div className="space-y-2">
+            <Label className="text-xs uppercase tracking-wider text-slate-400">Emergency Only</Label>
+            <div className="flex items-center gap-2">
+              <Switch
+                checked={policy.emergency_only}
+                onCheckedChange={(v) => onUpdate({ emergency_only: v })}
+              />
+              <span className="text-[10px] text-slate-500">Suppress non-emergency traffic</span>
+            </div>
+          </div>
+        </div>
+
+        <div className="space-y-2">
+          <Label className="text-xs uppercase tracking-wider text-slate-400">Forbidden Transports (comma-separated)</Label>
+          <input
+            type="text"
+            value={(policy.forbidden_transports || []).join(',')}
+            onChange={(e) => onUpdate({ forbidden_transports: e.target.value.split(',').filter((s) => s.trim()) })}
+            placeholder="e.g. BLE,LAN"
+            className="w-full h-8 rounded-md border border-slate-700 bg-slate-950 px-2 text-sm font-mono text-slate-200 focus:outline-none focus:ring-1 focus:ring-amber-500"
+          />
+          <p className="text-[10px] text-slate-500">Router will skip these transport types. Example: "BLE" forces LAN-only routing.</p>
+        </div>
+
+        <div className="rounded-lg border border-slate-800 bg-slate-950/50 p-3">
+          <div className="text-[10px] uppercase tracking-wider text-slate-500 mb-1">Active Policy</div>
+          <pre className="text-[10px] text-slate-400 font-mono whitespace-pre-wrap">
+            {JSON.stringify(policy, null, 2)}
+          </pre>
+        </div>
+      </CardContent>
+    </Card>
+  );
+}
+
 function DeliveryTimeline({
   delivery,
   queues,
@@ -1394,7 +1576,7 @@ function RoadmapCard() {
     { id: 'P9', name: 'Intelligent Routing', status: 'DONE' },
     { id: 'P10', name: 'Universal Identity Graph', status: 'DONE' },
     { id: 'P11', name: 'Consumer Application', status: 'DONE' },
-    { id: 'P12', name: 'Business Platform', status: 'PENDING' },
+    { id: 'P12', name: 'Business Platform', status: 'DONE' },
     { id: 'P13', name: 'Community Network', status: 'PENDING' },
     { id: 'P14', name: 'AI', status: 'PENDING' },
   ];
@@ -1468,7 +1650,7 @@ function Footer({ onReset }: { onReset: () => void }) {
     <footer className="mt-auto border-t border-slate-800 bg-slate-900/50">
       <div className="container mx-auto px-4 py-3 flex items-center justify-between">
         <div className="text-[10px] text-slate-500 font-mono">
-          bundle → transport → destination (no Internet required) · ARCH-001..040 · tested in CI
+          bundle → transport → destination (no Internet required) · ARCH-001..042 · tested in CI
         </div>
         <Button size="sm" variant="outline" onClick={onReset} className="border-slate-700 text-slate-400 hover:bg-slate-800 text-xs">
           Reset Network

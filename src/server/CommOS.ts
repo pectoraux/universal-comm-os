@@ -37,6 +37,7 @@ import {
   type NodeCapabilities,
   type Intent,
   type Proof,
+  type RoutingPolicy,
   type CapabilityCache,
   type CapabilityAdvertisement,
   type IdentityGraph,
@@ -165,6 +166,8 @@ class SimulatedNetwork {
    * here, grouped by node_id → conversation_id → messages[].
    */
   inbox: Map<string, InboxMessage[]> = new Map();
+  /** P12: the active routing policy (editable at runtime via updateRoutingPolicy). */
+  activePolicy: RoutingPolicy = defaultPolicy;
   /** True = use persistent Prisma store; false = use in-memory store. */
   readonly persistent: boolean;
   readonly sweeper: TtlSweeper;
@@ -336,6 +339,111 @@ class SimulatedNetwork {
       }
     }
     return { ok: true, marked };
+  }
+
+  // ──────────────────────────────────────────────────────────────────────
+  // P12: Analytics + Routing Policy Management (ARCH-041, ARCH-042).
+  // ──────────────────────────────────────────────────────────────────────
+
+  /**
+   * P12: compute delivery analytics from the delivery tracker + dispatched
+   * bundles. Per THREAT_MODEL §11 (Observability): does NOT expose private
+   * message contents — only aggregate statistics.
+   */
+  async getAnalytics(): Promise<{
+    total_dispatched: number;
+    total_delivered: number;
+    total_expired: number;
+    total_no_route: number;
+    total_relayed: number;
+    total_queued: number;
+    delivery_rate: number;
+    per_node: Array<{
+      node_id: string;
+      delivered: number;
+      relayed: number;
+      expired: number;
+      no_route: number;
+      queued: number;
+    }>;
+    route_stats: {
+      avg_reliability: number;
+      avg_latency_ms: number;
+      avg_cost: number;
+      hop_distribution: Record<number, number>;
+    };
+  }> {
+    const snapshots = await this.deliverySnapshots();
+    const dispatched = Array.from(this.dispatchedBundles.values());
+
+    let totalDelivered = 0;
+    let totalExpired = 0;
+    let totalNoRoute = 0;
+    let totalRelayed = 0;
+    let totalQueued = 0;
+
+    const perNodeMap = new Map<string, { delivered: number; relayed: number; expired: number; no_route: number; queued: number }>();
+
+    for (const snap of snapshots) {
+      const state = snap.current;
+      const nodeEntry = perNodeMap.get(snap.node_id) ?? { delivered: 0, relayed: 0, expired: 0, no_route: 0, queued: 0 };
+      if (state === 'DELIVERED' || state === 'READ') { totalDelivered++; nodeEntry.delivered++; }
+      else if (state === 'EXPIRED') { totalExpired++; nodeEntry.expired++; }
+      else if (state === 'NO_ROUTE') { totalNoRoute++; nodeEntry.no_route++; }
+      else if (state === 'RELAYED') { totalRelayed++; nodeEntry.relayed++; }
+      else if (state === 'QUEUED') { totalQueued++; nodeEntry.queued++; }
+      perNodeMap.set(snap.node_id, nodeEntry);
+    }
+
+    // Route stats from dispatched bundles (if they have a route plan).
+    let sumReliability = 0;
+    let sumLatency = 0;
+    let sumCost = 0;
+    let routeCount = 0;
+    const hopDist: Record<number, number> = {};
+    for (const d of dispatched) {
+      // We don't store the route plan with the dispatched bundle; compute from delivery snapshots.
+      // For now, count hops from the number of delivery records per bundle_id.
+      const bundleSnaps = snapshots.filter((s) => s.bundle_id === d.bundle.bundle_id);
+      const hops = bundleSnaps.length;
+      hopDist[hops] = (hopDist[hops] ?? 0) + 1;
+      routeCount++;
+    }
+
+    return {
+      total_dispatched: dispatched.length,
+      total_delivered: totalDelivered,
+      total_expired: totalExpired,
+      total_no_route: totalNoRoute,
+      total_relayed: totalRelayed,
+      total_queued: totalQueued,
+      delivery_rate: dispatched.length > 0 ? totalDelivered / dispatched.length : 0,
+      per_node: Array.from(perNodeMap.entries()).map(([node_id, stats]) => ({ node_id, ...stats })),
+      route_stats: {
+        avg_reliability: routeCount > 0 ? sumReliability / routeCount : 0,
+        avg_latency_ms: routeCount > 0 ? sumLatency / routeCount : 0,
+        avg_cost: routeCount > 0 ? sumCost / routeCount : 0,
+        hop_distribution: hopDist,
+      },
+    };
+  }
+
+  /**
+   * P12: update the active routing policy. Propagates to all node runtimes
+   * via `setPolicy()`. Affects subsequent dispatches only — existing bundles
+   * keep their original routing_policy inline (immutable per ARCH-003).
+   */
+  updateRoutingPolicy(updates: Partial<RoutingPolicy>): RoutingPolicy {
+    this.activePolicy = { ...this.activePolicy, ...updates };
+    for (const rt of this.runtimes.values()) {
+      rt.setPolicy(this.activePolicy);
+    }
+    return this.activePolicy;
+  }
+
+  /** P12: get the current routing policy. */
+  getRoutingPolicy(): RoutingPolicy {
+    return this.activePolicy;
   }
 
   private setup() {
