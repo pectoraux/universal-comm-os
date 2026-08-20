@@ -148,3 +148,40 @@ The IdentityLink state machine defined in `src/core/identity/IdentityLinkStateMa
 6. **The `revoke()` method on `IdentityGraph` MUST NOT delete the link.** A `REVOKED` link is retained for forensic audit trail. The link's `last_transition_at` and `last_event` fields are updated to record the transition.
 7. **The `link()` method on `IdentityGraph` MUST produce a link in `ASSERTED` state**, not `VERIFIED`. A signed `CHANNEL_OWNERSHIP` proof attests an assertion (the identity claims ownership); it does NOT prove channel control. Advancing to `VERIFIED` requires the channel owner to complete an in-band challenge-response through the actual target channel.
 8. **Demo / test bootstrap MAY use a fast-path** (`linkIdentityToChannelVerifiedForDemo()` on `CommOS`) that asserts AND verifies in a single call. The transition still goes through the canonical state machine (`ASSERT` then `VERIFY`). The fast-path MUST be clearly named and gated so production callers cannot accidentally use it.
+
+## Article XVI — Repository Truth Gate (S0.2.3)
+
+An agent's report that a milestone is "complete" is not verifiable unless the implementation that produced the test results is identical to the implementation in the authoritative repository branch. Local-only implementation that passes tests is not "complete" — it is "unpushed work" and counts as a governance failure.
+
+Before declaring ANY milestone (S0.X, Pn) COMPLETE, the agent MUST execute the Repository Truth Gate in this exact order:
+
+1. **Run the full acceptance suite** (`bun run vitest --run`). Record pass count.
+2. **Record the tested commit SHA** = `git rev-parse HEAD` of the working tree at test time.
+3. **Verify the worktree is clean** = `git status --porcelain` returns empty. If dirty, the test results do not correspond to a specific commit — STOP and either commit or stash before re-running tests.
+4. **Commit all changes** if any uncommitted work exists. Commit messages must reference the milestone ID (e.g., `S0.2.2 — canonical state machine`).
+5. **Push to GitHub** = `git push origin main` (or the milestone's target branch). The push must succeed without rejection.
+6. **Fetch GitHub main HEAD** = `git fetch origin` then `git rev-parse origin/main`.
+7. **Assert** `local HEAD == origin/main HEAD == tested commit SHA`. All three must be equal. If any pair differs, the milestone is NOT complete.
+8. **Produce the COMMIT REPORT** in the milestone completion message:
+
+```
+MILESTONE: <id>
+LOCAL HEAD:     <sha>
+GITHUB main:    <sha>
+TESTED SHA:     <sha>
+MATCH:          YES | NO
+WORKTREE CLEAN: YES | NO
+TEST RESULT:    <N> passed / <N> failed
+ARCHITECTURE:   <N> passed / <N> failed
+BUILD/CHECK:    PASS | FAIL
+FILES ADDED:    <list>
+FILES MODIFIED: <list>
+```
+
+9. **Independent verification**: the human reviewer may run `git ls-tree -r origin/main --name-only` and `git show origin/main:<path>` to confirm each claimed file is actually present at the claimed SHA on GitHub. The agent MUST NOT claim a file is on main unless `git show origin/main:<path>` succeeds for that path.
+
+10. **CI enforcement (when GitHub Actions is enabled)**: a workflow on `push` and `pull_request` MUST emit `BUILD_AT_SHA`, `TESTED_AT_SHA`, and `ARCHITECTURE_AT_SHA` as outputs, and fail the build if `git status --porcelain` is non-empty or if the three SHAs do not all equal `github.sha`. This makes the gate machine-enforced, not agent-reported.
+
+A milestone reported COMPLETE without satisfying Article XVI is automatically INVALID — the report counts as an architecture-control defect, not a milestone completion. The reviewer MUST NOT accept such a report.
+
+This article was added in response to the S0.2.2 governance failure: the agent reported "All 259 tests pass / S0.2.2 is complete" while the implementation existed only in the local working tree and had not been pushed to GitHub `main`. The reviewer's independent check of the authoritative branch proved the claimed `IdentityLinkStateMachine.ts` returned 404 and the claimed `VerificationState` vocabulary was still the old 3-state `UNVERIFIED | VERIFIED | REVOKED`. The fix is not merely pushing the work — it is preventing the asymmetry from recurring.

@@ -76,3 +76,91 @@ jobs:
           name: ci-artifacts
           path: ci-artifacts/
           if-no-files-found: ignore
+
+  # ─── S0.2.3 / Article XVI / ARCH-051 — Repository Truth Gate ──────────
+  # Machine-enforces the invariant: local HEAD == origin/main HEAD ==
+  # tested commit SHA, and the worktree is clean. Prevents the S0.2.2
+  # governance failure where the agent reported "complete" while the
+  # implementation existed only locally and had not been pushed.
+  repo-truth-gate:
+    runs-on: ubuntu-latest
+    needs: ci  # only run if the build/test job passed
+    outputs:
+      build_at_sha: ${{ steps.gate.outputs.BUILD_AT_SHA }}
+      tested_at_sha: ${{ steps.gate.outputs.TESTED_AT_SHA }}
+      architecture_at_sha: ${{ steps.gate.outputs.ARCHITECTURE_AT_SHA }}
+      worktree_clean: ${{ steps.gate.outputs.WORKTREE_CLEAN }}
+      match: ${{ steps.gate.outputs.MATCH }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: oven-sh/setup-bun@v1
+
+      - name: Install dependencies
+        run: bun install
+
+      - name: Generate Prisma Client
+        run: npx prisma generate
+
+      - name: Repository Truth Gate
+        id: gate
+        run: |
+          set -e
+          # 1. Worktree clean?
+          DIRTY=$(git status --porcelain | wc -l | tr -d ' ')
+          if [ "$DIRTY" -ne 0 ]; then
+            echo "WORKTREE_CLEAN=NO" >> "$GITHUB_OUTPUT"
+            echo "::error::Worktree is dirty — tests do not correspond to a specific commit."
+            git status --porcelain
+            exit 1
+          fi
+          echo "WORKTREE_CLEAN=YES" >> "$GITHUB_OUTPUT"
+
+          # 2. Record SHAs
+          BUILD_AT_SHA=$(git rev-parse HEAD)
+          echo "BUILD_AT_SHA=$BUILD_AT_SHA" >> "$GITHUB_OUTPUT"
+          echo "TESTED_AT_SHA=$BUILD_AT_SHA" >> "$GITHUB_OUTPUT"
+          echo "ARCHITECTURE_AT_SHA=$BUILD_AT_SHA" >> "$GITHUB_OUTPUT"
+
+          # 3. github.sha == local HEAD
+          if [ "$BUILD_AT_SHA" != "${{ github.sha }}" ]; then
+            echo "MATCH=NO" >> "$GITHUB_OUTPUT"
+            echo "::error::Local HEAD ($BUILD_AT_SHA) != github.sha (${{ github.sha }})"
+            exit 1
+          fi
+
+          # 4. Run tests at this exact commit
+          echo "Running full test suite at $BUILD_AT_SHA ..."
+          bun run vitest --run
+
+          # 5. Re-check worktree after tests
+          DIRTY2=$(git status --porcelain | wc -l | tr -d ' ')
+          if [ "$DIRTY2" -ne 0 ]; then
+            echo "WORKTREE_CLEAN=NO" >> "$GITHUB_OUTPUT"
+            echo "::error::Tests mutated tracked files — worktree dirty after tests."
+            git status --porcelain
+            exit 1
+          fi
+
+          # 6. Architecture subset
+          bun run vitest --run tests/architecture/
+
+          # 7. Final invariant: HEAD unchanged after tests
+          FINAL_HEAD=$(git rev-parse HEAD)
+          if [ "$FINAL_HEAD" != "$BUILD_AT_SHA" ]; then
+            echo "MATCH=NO" >> "$GITHUB_OUTPUT"
+            echo "::error::HEAD moved during tests (was $BUILD_AT_SHA, now $FINAL_HEAD)."
+            exit 1
+          fi
+
+          echo "MATCH=YES" >> "$GITHUB_OUTPUT"
+          echo ""
+          echo "=== REPOSITORY TRUTH GATE — VALIDATED ==="
+          echo "BUILD_AT_SHA:        $BUILD_AT_SHA"
+          echo "TESTED_AT_SHA:       $BUILD_AT_SHA"
+          echo "ARCHITECTURE_AT_SHA: $BUILD_AT_SHA"
+          echo "WORKTREE CLEAN:      YES"
+          echo "MATCH:               YES (local HEAD == github.sha == tested SHA)"
+          echo "=== END ==="
