@@ -48,6 +48,7 @@ Numbered architectural decisions. Append-only. Each entry: ID, decision, rationa
 | ARCH-042 | Routing policy management (P12): the active routing policy is editable at runtime via `setPolicy()` on NodeRuntime + `updateRoutingPolicy()` on CommOS. Changes affect subsequent dispatches only — existing bundles keep their original routing_policy inline (immutable per ARCH-003). | ACTIVE  |
 | ARCH-043 | AI assistive layer (P14): AI (z-ai-web-dev-sdk) operates ABOVE the deterministic communication protocol. It assists with intent interpretation, routing recommendations, and conversation summarization. The AI SUGGESTS; the user CONFIRMS. The AI never signs bundles, verifies identities, makes routing decisions, or governs delivery truth. | ACTIVE  |
 | ARCH-044 | AI must not govern security invariants (P14): per the master prompt, AI MUST NOT become authority for cryptography, identity verification, authorization, protocol semantics, delivery truth, or security invariants. The AI's output is advisory only — the deterministic protocol governs. The z-ai-web-dev-sdk is used in backend code only (server actions). | ACTIVE  |
+| ARCH-045 | Multi-channel adapter pattern (P8): the gateway runtime registers multiple ChannelAdapters (Email, SMS, WhatsApp). Each adapter packages opaque bundle bytes into its channel-native format. The same ChannelAdapter interface + GatewayRuntime work for all channels — adding a new adapter is a pure addition (no core protocol changes). | ACTIVE  |
 
 ---
 

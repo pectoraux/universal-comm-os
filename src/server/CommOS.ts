@@ -51,6 +51,8 @@ import { createPrismaBundleStore, createPrismaDeliveryTracker, type PersistedDel
 import { createTtlSweeper, type TtlSweeper } from '@/server/TtlSweeper';
 import { createGatewayRuntime, type GatewayRuntime } from '@/gateway/GatewayRuntime';
 import { EmailAdapter, type EmailTranscript, type EmailTranscriptEntry } from '@/adapters/email/EmailAdapter';
+import { SmsAdapter, type SmsTranscript, type SmsTranscriptEntry } from '@/adapters/sms/SmsAdapter';
+import { WhatsappAdapter, type WhatsappTranscript, type WhatsappTranscriptEntry } from '@/adapters/whatsapp/WhatsappAdapter';
 import { utf8Encode, utf8Decode, b64urlEncode } from '@/core/util/encoding';
 import { db } from '@/lib/db';
 
@@ -152,6 +154,10 @@ class SimulatedNetwork {
   readonly gatewayRuntimes = new Map<string, GatewayRuntime>();
   /** P6: email transcript (the EmailAdapter writes here). */
   emailTranscript: EmailTranscript = { entries: [] };
+  /** P8: SMS transcript (the SmsAdapter writes here). */
+  smsTranscript: SmsTranscript = { entries: [] };
+  /** P8: WhatsApp transcript (the WhatsappAdapter writes here). */
+  whatsappTranscript: WhatsappTranscript = { entries: [] };
   /** P5: periodic gossip timer. */
   gossipTimer: ReturnType<typeof setInterval> | null = null;
   /**
@@ -510,7 +516,7 @@ class SimulatedNetwork {
       messaging: [],
       transport: ['INTERNET', 'LAN'],
       relay: ['FORWARD'],
-      gateway: ['EMAIL', 'SMS', 'MATRIX'],
+      gateway: ['EMAIL', 'SMS', 'WHATSAPP', 'MATRIX'],
       resource: { bandwidth_bps: 10_000_000, storage_bytes: 10_000_000_000, battery_pct: 100 },
       verification: 'TRUSTED',
     });
@@ -567,19 +573,37 @@ class SimulatedNetwork {
       capabilityCache: makeCache(),
       onDelivered: (bundle, from) => this.handleDelivered('relay', bundle, from),
     });
-    // P6: Gateway runtime with EmailAdapter (EXPERIMENTAL — in-process transcript).
-    // The gateway node is the only node that has the EMAIL gateway capability.
-    // When a bundle with recipient.kind === 'CHANNEL' arrives at the gateway,
-    // the gateway runtime delegates to the EmailAdapter.
+    // P6+P8: Gateway runtime with EmailAdapter + SmsAdapter + WhatsappAdapter
+    // (all EXPERIMENTAL — in-process transcripts). The gateway node advertises
+    // EMAIL, SMS, WHATSAPP gateway capabilities. When a bundle with
+    // recipient.kind === 'CHANNEL' arrives at the gateway, the gateway runtime
+    // delegates to the matching adapter.
     const emailTranscript: EmailTranscript = { entries: [] };
     this.emailTranscript = emailTranscript;
+    const smsTranscript: SmsTranscript = { entries: [] };
+    this.smsTranscript = smsTranscript;
+    const whatsappTranscript: WhatsappTranscript = { entries: [] };
+    this.whatsappTranscript = whatsappTranscript;
+
     const emailAdapter = new EmailAdapter({
       adapter_id: 'email-adapter-demo',
       from_address: 'gateway@universal-comm-os.demo',
       transcript: emailTranscript,
     });
+    const smsAdapter = new SmsAdapter({
+      adapter_id: 'sms-adapter-demo',
+      from_number: '+15550000000',
+      transcript: smsTranscript,
+    });
+    const whatsappAdapter = new WhatsappAdapter({
+      adapter_id: 'whatsapp-adapter-demo',
+      from_number: '+15550000000',
+      transcript: whatsappTranscript,
+    });
     const gatewayRuntime = createGatewayRuntime();
     gatewayRuntime.registerAdapter(emailAdapter);
+    gatewayRuntime.registerAdapter(smsAdapter);
+    gatewayRuntime.registerAdapter(whatsappAdapter);
     this.gatewayRuntimes.set('gateway', gatewayRuntime);
 
     const gatewayRT = createNodeRuntime({
@@ -825,6 +849,16 @@ class SimulatedNetwork {
     return [...this.emailTranscript.entries];
   }
 
+  /** P8: expose the SMS transcript for UI rendering. */
+  smsTranscriptEntries(): SmsTranscriptEntry[] {
+    return [...this.smsTranscript.entries];
+  }
+
+  /** P8: expose the WhatsApp transcript for UI rendering. */
+  whatsappTranscriptEntries(): WhatsappTranscriptEntry[] {
+    return [...this.whatsappTranscript.entries];
+  }
+
   /**
    * Snapshot delivery state across all nodes. P3: now per (bundle, node).
    * In persistent mode, the snapshot comes from the DB; in-memory mode reads
@@ -984,6 +1018,8 @@ class SimulatedNetwork {
     this.dispatchedBundles.clear();
     this.gatewayRuntimes.clear();
     this.emailTranscript = { entries: [] };
+    this.smsTranscript = { entries: [] };
+    this.whatsappTranscript = { entries: [] };
     this.identityGraph.clear();
     this.inbox.clear();
     // Clear persistent tables too so the demo starts fresh.

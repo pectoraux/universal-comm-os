@@ -22,6 +22,8 @@ import {
   sweepOnceAction,
   getSweeperStatusAction,
   getEmailTranscriptAction,
+  getSmsTranscriptAction,
+  getWhatsappTranscriptAction,
   getCapabilityCachesAction,
   gossipNowAction,
   getIdentityGraphAction,
@@ -156,6 +158,8 @@ export default function Home() {
   const [proofsView, setProofsView] = useState<{ bundle_id: string; proofs: Array<{ kind: string; signer_id: string; ts: number; verified: boolean }> } | null>(null);
   const [sweeperStatus, setSweeperStatus] = useState<{ running: boolean; last?: { expired_count: number; ts: number } } | null>(null);
   const [emailTranscript, setEmailTranscript] = useState<Array<{ message_id: string; to: string; from: string; subject: string; body: string; sent_at: number; bundle_id: string }>>([]);
+  const [smsTranscript, setSmsTranscript] = useState<Array<any>>([]);
+  const [whatsappTranscript, setWhatsappTranscript] = useState<Array<any>>([]);
   const [capabilityCaches, setCapabilityCaches] = useState<Array<{ node_id: string; entries: Array<any> }>>([]);
   const [identityGraph, setIdentityGraph] = useState<Array<any>>([]);
   const [inbox, setInbox] = useState<Array<{ conversation_id: string; messages: Array<any>; unread_count: number }>>([]);
@@ -168,7 +172,7 @@ export default function Home() {
   const [fromNode, setFromNode] = useState('alice');
   const [toNode, setToNode] = useState('bob');
   /** P6: 'identity' (to_node_id) or 'channel' (to_channel). */
-  const [recipientMode, setRecipientMode] = useState<'identity' | 'channel'>('identity');
+  const [recipientMode, setRecipientMode] = useState<'identity' | 'email' | 'sms' | 'whatsapp'>('identity');
   const [toEmail, setToEmail] = useState('bob@example.com');
   const [intentType, setIntentType] = useState<'SEND_MESSAGE' | 'NOTIFY' | 'REQUEST_RESPONSE' | 'DELIVER_DOCUMENT' | 'SEND_MEDIA' | 'EMERGENCY_ALERT' | 'SYNC_CONVERSATION'>('SEND_MESSAGE');
   const [priority, setPriority] = useState<'BULK' | 'NORMAL' | 'PRIORITY' | 'URGENT' | 'EMERGENCY'>('NORMAL');
@@ -176,7 +180,7 @@ export default function Home() {
   const [replicate, setReplicate] = useState(false);
 
   const refresh = useCallback(async () => {
-    const [n, ns, dl, q, ss, et, cc, ig, ib, an, rp] = await Promise.all([
+    const [n, ns, dl, q, ss, et, cc, ig, ib, an, rp, st, wt] = await Promise.all([
       getNetworkStateAction(),
       listNodesAction(),
       getDeliverySnapshotsAction(),
@@ -188,6 +192,8 @@ export default function Home() {
       getInboxAction(inboxNode),
       getAnalyticsAction(),
       getRoutingPolicyAction(),
+      getSmsTranscriptAction(),
+      getWhatsappTranscriptAction(),
     ]);
     setTimeout(() => {
       setNetwork(n);
@@ -201,6 +207,8 @@ export default function Home() {
       Promise.resolve(ib).then((i) => setInbox(i as any));
       Promise.resolve(an).then((a) => setAnalytics(a));
       Promise.resolve(rp).then((p) => setRoutingPolicy(p));
+      Promise.resolve(st).then((s) => setSmsTranscript(s));
+      Promise.resolve(wt).then((w) => setWhatsappTranscript(w));
     }, 0);
   }, [inboxNode]);
 
@@ -226,7 +234,7 @@ export default function Home() {
     if (recipientMode === 'identity') {
       req.to_node_id = toNode;
     } else {
-      req.to_channel = { channel: 'EMAIL', channel_id: toEmail };
+      req.to_channel = { channel: recipientMode.toUpperCase() as any, channel_id: toEmail };
     }
     const res = await dispatchBundleAction(req);
     setLastDispatch(res);
@@ -457,7 +465,7 @@ export default function Home() {
           <CapabilityCacheCard caches={capabilityCaches} onGossipNow={onGossipNow} />
           <IdentityGraphCard graph={identityGraph} nodes={nodes} onLinkIdentity={onLinkIdentity} />
           <DtnStatusCard sweeperStatus={sweeperStatus} onSweepOnce={onSweepOnce} queues={queues} />
-          <EmailTranscriptCard transcript={emailTranscript} />
+          <EmailTranscriptCard transcript={emailTranscript} smsTranscript={smsTranscript} whatsappTranscript={whatsappTranscript} />
           <InboxCard
             inbox={inbox}
             inboxNode={inboxNode}
@@ -509,7 +517,7 @@ function Header() {
           </div>
         </div>
         <Badge variant="outline" className="border-emerald-500 text-emerald-400">
-          P0 · P1 · P2 · P3 · P5 · P6 · P9 · P10 · P11 · P12 · P14 live
+          P0 · P1 · P2 · P3 · P5 · P6 · P8 · P9 · P10 · P11 · P12 · P14 live
         </Badge>
       </div>
     </header>
@@ -568,8 +576,8 @@ function DispatchComposer(props: {
   setFromNode: (s: string) => void;
   toNode: string;
   setToNode: (s: string) => void;
-  recipientMode: 'identity' | 'channel';
-  setRecipientMode: (m: 'identity' | 'channel') => void;
+  recipientMode: 'identity' | 'email' | 'sms' | 'whatsapp';
+  setRecipientMode: (m: 'identity' | 'email' | 'sms' | 'whatsapp') => void;
   toEmail: string;
   setToEmail: (s: string) => void;
   intentType: string;
@@ -640,7 +648,7 @@ function DispatchComposer(props: {
           <div className="space-y-2">
             <div className="flex items-center justify-between">
               <Label className="text-xs uppercase tracking-wider text-slate-400">Recipient</Label>
-              <div className="flex gap-1">
+              <div className="flex gap-1 flex-wrap">
                 <Button
                   size="sm"
                   variant={recipientMode === 'identity' ? 'default' : 'outline'}
@@ -651,11 +659,27 @@ function DispatchComposer(props: {
                 </Button>
                 <Button
                   size="sm"
-                  variant={recipientMode === 'channel' ? 'default' : 'outline'}
-                  onClick={() => setRecipientMode('channel')}
+                  variant={recipientMode === 'email' ? 'default' : 'outline'}
+                  onClick={() => setRecipientMode('email')}
                   className="h-6 px-2 text-[10px]"
                 >
                   Email (P6)
+                </Button>
+                <Button
+                  size="sm"
+                  variant={recipientMode === 'sms' ? 'default' : 'outline'}
+                  onClick={() => setRecipientMode('sms')}
+                  className="h-6 px-2 text-[10px]"
+                >
+                  SMS (P8)
+                </Button>
+                <Button
+                  size="sm"
+                  variant={recipientMode === 'whatsapp' ? 'default' : 'outline'}
+                  onClick={() => setRecipientMode('whatsapp')}
+                  className="h-6 px-2 text-[10px]"
+                >
+                  WhatsApp (P8)
                 </Button>
               </div>
             </div>
@@ -1104,52 +1128,110 @@ function StatBlock({ label, value, color }: { label: string; value: string; colo
   );
 }
 
-function EmailTranscriptCard({ transcript }: { transcript: Array<{ message_id: string; to: string; from: string; subject: string; body: string; sent_at: number; bundle_id: string }> }) {
+function EmailTranscriptCard({ transcript, smsTranscript, whatsappTranscript }: { transcript: Array<{ message_id: string; to: string; from: string; subject: string; body: string; sent_at: number; bundle_id: string }>; smsTranscript: Array<any>; whatsappTranscript: Array<any> }) {
+  const [activeTab, setActiveTab] = useState<'email' | 'sms' | 'whatsapp'>('email');
   return (
     <Card className="bg-slate-900/70 border-slate-800">
       <CardHeader>
         <CardTitle className="flex items-center gap-2 text-base">
           <Send className="w-4 h-4 text-purple-400" />
-          Email Adapter Transcript (EXPERIMENTAL — P6)
+          Channel Adapter Transcripts (P6+P8 — EXPERIMENTAL)
         </CardTitle>
         <CardDescription className="text-slate-400">
-          The gateway&apos;s EmailAdapter packages opaque bundle bytes into email bodies. The recipient&apos;s email client decrypts on the other side. Gateway never sees plaintext.
+          The gateway&apos;s adapters package opaque bundle bytes into channel-native messages. Gateway never sees plaintext. Recipient decrypts on the other side.
         </CardDescription>
       </CardHeader>
       <CardContent>
-        {transcript.length === 0 ? (
-          <div className="text-sm text-slate-500 italic">
-            No emails sent yet. Switch recipient to &quot;Email (P6)&quot; above and dispatch a bundle.
-          </div>
-        ) : (
-          <ScrollArea className="max-h-[400px] pr-3">
-            <div className="space-y-2">
-              {transcript.map((e) => (
-                <div key={e.message_id} className="rounded-lg border border-slate-800 bg-slate-950/50 p-3">
-                  <div className="flex items-center justify-between mb-1">
-                    <span className="font-mono text-xs text-slate-400">{e.message_id}</span>
-                    <Badge variant="outline" className="border-purple-500 text-purple-400 text-[10px]">
-                      EMAIL
-                    </Badge>
-                  </div>
-                  <div className="text-xs space-y-0.5 font-mono">
-                    <div><span className="text-slate-500">From:</span> <span className="text-slate-300">{e.from}</span></div>
-                    <div><span className="text-slate-500">To:</span> <span className="text-slate-300">{e.to}</span></div>
-                    <div><span className="text-slate-500">Subject:</span> <span className="text-slate-300">{e.subject}</span></div>
-                    <div><span className="text-slate-500">Bundle:</span> <span className="text-slate-300">{e.bundle_id.slice(0, 18)}…</span></div>
-                    <div><span className="text-slate-500">Sent at:</span> <span className="text-slate-300">{new Date(e.sent_at).toLocaleTimeString()}</span></div>
-                  </div>
-                  <details className="mt-2">
-                    <summary className="text-[10px] text-slate-500 cursor-pointer hover:text-slate-400">Show email body (opaque ciphertext)</summary>
-                    <pre className="mt-1 text-[10px] text-slate-500 font-mono whitespace-pre-wrap break-all max-h-32 overflow-y-auto">
-                      {e.body}
-                    </pre>
-                  </details>
+        <Tabs value={activeTab} onValueChange={(v) => setActiveTab(v as any)}>
+          <TabsList className="mb-3">
+            <TabsTrigger value="email">Email ({transcript.length})</TabsTrigger>
+            <TabsTrigger value="sms">SMS ({smsTranscript.length})</TabsTrigger>
+            <TabsTrigger value="whatsapp">WhatsApp ({whatsappTranscript.length})</TabsTrigger>
+          </TabsList>
+          <TabsContent value="email">
+            {transcript.length === 0 ? (
+              <div className="text-sm text-slate-500 italic">No emails sent.</div>
+            ) : (
+              <ScrollArea className="max-h-[400px] pr-3">
+                <div className="space-y-2">
+                  {transcript.map((e) => (
+                    <div key={e.message_id} className="rounded-lg border border-slate-800 bg-slate-950/50 p-3">
+                      <div className="flex items-center justify-between mb-1">
+                        <span className="font-mono text-xs text-slate-400">{e.message_id}</span>
+                        <Badge variant="outline" className="border-purple-500 text-purple-400 text-[10px]">EMAIL</Badge>
+                      </div>
+                      <div className="text-xs space-y-0.5 font-mono">
+                        <div><span className="text-slate-500">From:</span> <span className="text-slate-300">{e.from}</span></div>
+                        <div><span className="text-slate-500">To:</span> <span className="text-slate-300">{e.to}</span></div>
+                        <div><span className="text-slate-500">Subject:</span> <span className="text-slate-300">{e.subject}</span></div>
+                        <div><span className="text-slate-500">Bundle:</span> <span className="text-slate-300">{e.bundle_id.slice(0, 18)}…</span></div>
+                        <div><span className="text-slate-500">Sent at:</span> <span className="text-slate-300">{new Date(e.sent_at).toLocaleTimeString()}</span></div>
+                      </div>
+                      <details className="mt-2">
+                        <summary className="text-[10px] text-slate-500 cursor-pointer hover:text-slate-400">Show email body (opaque ciphertext)</summary>
+                        <pre className="mt-1 text-[10px] text-slate-500 font-mono whitespace-pre-wrap break-all max-h-32 overflow-y-auto">{e.body}</pre>
+                      </details>
+                    </div>
+                  ))}
                 </div>
-              ))}
-            </div>
-          </ScrollArea>
-        )}
+              </ScrollArea>
+            )}
+          </TabsContent>
+          <TabsContent value="sms">
+            {smsTranscript.length === 0 ? (
+              <div className="text-sm text-slate-500 italic">No SMS sent. Switch recipient to SMS (P8) and dispatch.</div>
+            ) : (
+              <ScrollArea className="max-h-[400px] pr-3">
+                <div className="space-y-2">
+                  {smsTranscript.map((e: any) => (
+                    <div key={e.message_id} className="rounded-lg border border-slate-800 bg-slate-950/50 p-3">
+                      <div className="flex items-center justify-between mb-1">
+                        <span className="font-mono text-xs text-slate-400">{e.message_id}</span>
+                        <Badge variant="outline" className="border-amber-500 text-amber-400 text-[10px]">SMS · {e.segments} seg</Badge>
+                      </div>
+                      <div className="text-xs space-y-0.5 font-mono">
+                        <div><span className="text-slate-500">From:</span> <span className="text-slate-300">{e.from}</span></div>
+                        <div><span className="text-slate-500">To:</span> <span className="text-slate-300">{e.to}</span></div>
+                        <div><span className="text-slate-500">Bundle:</span> <span className="text-slate-300">{e.bundle_id.slice(0, 18)}…</span></div>
+                      </div>
+                      <details className="mt-2">
+                        <summary className="text-[10px] text-slate-500 cursor-pointer hover:text-slate-400">Show SMS body (opaque)</summary>
+                        <pre className="mt-1 text-[10px] text-slate-500 font-mono whitespace-pre-wrap break-all max-h-32 overflow-y-auto">{e.body}</pre>
+                      </details>
+                    </div>
+                  ))}
+                </div>
+              </ScrollArea>
+            )}
+          </TabsContent>
+          <TabsContent value="whatsapp">
+            {whatsappTranscript.length === 0 ? (
+              <div className="text-sm text-slate-500 italic">No WhatsApp messages sent. Switch recipient to WhatsApp (P8) and dispatch.</div>
+            ) : (
+              <ScrollArea className="max-h-[400px] pr-3">
+                <div className="space-y-2">
+                  {whatsappTranscript.map((e: any) => (
+                    <div key={e.message_id} className="rounded-lg border border-slate-800 bg-slate-950/50 p-3">
+                      <div className="flex items-center justify-between mb-1">
+                        <span className="font-mono text-xs text-slate-400">{e.message_id}</span>
+                        <Badge variant="outline" className="border-green-500 text-green-400 text-[10px]">WHATSAPP</Badge>
+                      </div>
+                      <div className="text-xs space-y-0.5 font-mono">
+                        <div><span className="text-slate-500">From:</span> <span className="text-slate-300">{e.from}</span></div>
+                        <div><span className="text-slate-500">To:</span> <span className="text-slate-300">{e.to}</span></div>
+                        <div><span className="text-slate-500">Bundle:</span> <span className="text-slate-300">{e.bundle_id.slice(0, 18)}…</span></div>
+                      </div>
+                      <details className="mt-2">
+                        <summary className="text-[10px] text-slate-500 cursor-pointer hover:text-slate-400">Show WhatsApp body (opaque)</summary>
+                        <pre className="mt-1 text-[10px] text-slate-500 font-mono whitespace-pre-wrap break-all max-h-32 overflow-y-auto">{e.body}</pre>
+                      </details>
+                    </div>
+                  ))}
+                </div>
+              </ScrollArea>
+            )}
+          </TabsContent>
+        </Tabs>
       </CardContent>
     </Card>
   );
@@ -1688,7 +1770,7 @@ function RoadmapCard() {
     { id: 'P5', name: 'Multi-hop Edge', status: 'DONE' },
     { id: 'P6', name: 'Internet Gateway', status: 'DONE' },
     { id: 'P7', name: 'Matrix Fabric', status: 'PENDING' },
-    { id: 'P8', name: 'External Channels', status: 'PENDING' },
+    { id: 'P8', name: 'External Channels', status: 'DONE' },
     { id: 'P9', name: 'Intelligent Routing', status: 'DONE' },
     { id: 'P10', name: 'Universal Identity Graph', status: 'DONE' },
     { id: 'P11', name: 'Consumer Application', status: 'DONE' },
@@ -1766,7 +1848,7 @@ function Footer({ onReset }: { onReset: () => void }) {
     <footer className="mt-auto border-t border-slate-800 bg-slate-900/50">
       <div className="container mx-auto px-4 py-3 flex items-center justify-between">
         <div className="text-[10px] text-slate-500 font-mono">
-          bundle → transport → destination (no Internet required) · ARCH-001..044 · tested in CI
+          bundle → transport → destination (no Internet required) · ARCH-001..045 · tested in CI
         </div>
         <Button size="sm" variant="outline" onClick={onReset} className="border-slate-700 text-slate-400 hover:bg-slate-800 text-xs">
           Reset Network

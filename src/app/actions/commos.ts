@@ -77,6 +77,18 @@ export async function getEmailTranscriptAction() {
   return net.emailTranscriptEntries();
 }
 
+// P8: SMS + WhatsApp transcript actions
+
+export async function getSmsTranscriptAction() {
+  const net = getNetwork();
+  return net.smsTranscriptEntries();
+}
+
+export async function getWhatsappTranscriptAction() {
+  const net = getNetwork();
+  return net.whatsappTranscriptEntries();
+}
+
 // P5 additions
 
 export async function getCapabilityCachesAction() {

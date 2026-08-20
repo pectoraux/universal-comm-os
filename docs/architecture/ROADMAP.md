@@ -67,10 +67,13 @@ Implementation sequencing per the master prompt. Vertical from the protocol outw
 - [ ] Matrix destination resolution
 - Matrix remains an adapter/fabric implementation, NOT the core protocol.
 
-## P8 — External Channels
-- [ ] EmailAdapter, SmsAdapter, WhatsAppAdapter (initial three)
-- [ ] RCS, Telegram, Instagram, Messenger (later)
-- Adapters are added AFTER the adapter abstraction is stable.
+## P8 — External Channels  (DONE in this iteration — Email + SMS + WhatsApp)
+- [x] EmailAdapter (P6) — proven with in-process transcript, opaque bytes only
+- [x] SmsAdapter — packages opaque bundle bytes into compact SMS payload format with segment counting; in-process transcript; EXPERIMENTAL
+- [x] WhatsappAdapter — packages opaque bundle bytes into WhatsApp message format (longer body); in-process transcript; EXPERIMENTAL
+- [x] Gateway runtime registers all three adapters; dispatch supports EMAIL/SMS/WHATSAPP channel recipients
+- [x] UI: tabbed Channel Adapter Transcripts card showing Email + SMS + WhatsApp transcripts; recipient mode toggle has 4 options (Identity/Email/SMS/WhatsApp)
+- [ ] RCS, Telegram, Instagram, Messenger adapters (deferred — the ChannelAdapter interface is proven; more adapters can be added without touching core)
 
 ## P9 — Intelligent Routing  (DONE in this iteration)
 - [x] `computeHopMetrics()` derives reliability/latency/cost/privacy/delivery_probability from peer's resource report (battery, bandwidth, storage, compute) + verification state + intent constraints

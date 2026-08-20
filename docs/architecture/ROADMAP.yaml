@@ -91,7 +91,7 @@ phases:
 
   - id: P8
     name: External Channels
-    status: PENDING
+    status: DONE
     items:
       - email_adapter
       - sms_adapter
