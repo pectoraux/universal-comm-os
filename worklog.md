@@ -646,3 +646,29 @@ STATUS:
 - P4.2 (BLE): STILL BLOCKED until P4.1-B is VALIDATED (H8 + H9 pass).
 - TypeScript suite: 513 tests pass, tsc clean.
 - Web preview: Next.js dev server running on port 3000.
+
+---
+Task ID: S0.2.6-A
+Agent: main (super-z)
+Task: Revert the SQLite regression in prisma/schema.prisma. The PostgreSQL provider was changed to SQLite to make the web preview work locally — this is a frozen architecture violation. Revert to postgresql, add an architecture test enforcing it, and keep the web preview running with a PostgreSQL-compatible connection string.
+
+Work Log:
+- REVERTED prisma/schema.prisma: `provider = "sqlite"` → `provider = "postgresql"`. The comment is now "PostgreSQL on Neon for production, local PostgreSQL for dev."
+- Updated .env: `DATABASE_URL=file:/home/z/my-project/db/custom.db` → `DATABASE_URL=postgresql://commos:commos@localhost:5432/commos_dev`. (No local PostgreSQL server available in this sandbox — the connection won't establish, but the Prisma client generates correctly. The in-memory CommOS network still works for preview.)
+- Ran `npx prisma generate` — succeeded (Prisma generate doesn't connect to the DB, it only reads the schema).
+- Created tests/architecture/s026a-postgres-provider.test.ts — 4 tests:
+  1. The datasource provider is "postgresql" (not "sqlite").
+  2. The schema does not mention "SQLite for local dev".
+  3. The schema comment references PostgreSQL.
+  4. The .env DATABASE_URL uses postgresql:// (not file:).
+- These tests prevent the SQLite regression from recurring — a future change to SQLite would fail CI.
+- Restarted the Next.js dev server — HTTP 200. The in-memory CommOS network (Alice, Bob, Relay, Gateway) works without a database connection. DB-dependent features (auth login, waitlist) will fail gracefully (Prisma client will throw on first query, caught by safeError).
+- Verified the full suite: 517 tests pass (4 new PostgreSQL tests + 513 prior). tsc clean.
+
+Stage Summary:
+- The SQLite regression is REVERTED. The canonical Prisma schema is PostgreSQL.
+- The web preview runs with a PostgreSQL DATABASE_URL (the in-memory network works; DB-dependent features fail gracefully without a local PostgreSQL server).
+- An architecture test prevents future regressions (S0.2.6-A test suite).
+- The web preview is available at the platform's preview URL.
+- P4.1-B-H status is unchanged: SOURCE IMPLEMENTED / VALIDATION IN PROGRESS. The Android hardening work (H1-H7) is committed alongside this revert. H8 (compile) and H9 (instrumentation) remain pending.
+- P4.2 BLE: STILL BLOCKED.
