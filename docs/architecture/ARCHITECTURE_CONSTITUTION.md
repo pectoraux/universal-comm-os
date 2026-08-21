@@ -501,7 +501,74 @@ The bundle is already end-to-end encrypted via `CryptoEnvelope` (Article IX — 
 
 Hardware adapters MUST NOT introduce new cryptographic primitives, new signature algorithms, new key types, or new hash functions (Article IX). All crypto goes through `core/trust/CryptoEnvelope` and `core/trust/Proof`.
 
-### §9. Violations are architecture-control defects
+### §9. (S0.2.6 — strengthened) Two-layer encryption is a structural property, not a feature
+
+The protocol has TWO cryptographically independent encryption layers (see P4 design §7.2):
+
+- **Layer 1 — Bundle end-to-end encryption** (frozen, Article IX + ARCH-014): X25519 sealed-box, recipient's pubkey, sealed at dispatch, opened only by recipient's X25519 secret key.
+- **Layer 2 — Transport session encryption** (P4, link-layer): BLE LE Secure Connections (ECDH + AES-CCM), Wi-Fi Direct WPA2-Personal (AES-CCMP). Per-session, torn down on `close()` / peer disconnect.
+
+A relay MUST be able to forward an opaque bundle without possessing the bundle decryption key. Removing this separation would require redefining the bundle format (Article IV — frozen), sharing the recipient's X25519 secret key with relays (THREAT_MODEL §1 — frozen), and inventing new crypto (Article IX — frozen). The two-layer separation is non-negotiable.
+
+### §10. (S0.2.6 — strengthened) Transport framing is ephemeral, NOT bundle semantics
+
+Hardware adapters MAY add transport framing fields (BLE chunk sequence + flag, Wi-Fi Direct length prefix) to chunk / reassemble bundles across the physical layer. The framing fields exist ONLY in transit. They are:
+
+- NOT serialized into the `CommunicationBundle` (Article IV — frozen).
+- NOT persisted in the `BundleStore` (Article VI — frozen).
+- NOT visible to the recipient's `parseBundle()`.
+- NOT carrying protocol meaning (no delivery state, no authorization, no trust).
+
+A hardware adapter that uses framing fields to encode protocol semantics violates Article IV + Article XVIII §3 (transports do not interpret bundle contents).
+
+### §11. (S0.2.6 — strengthened) Gossip side-channel is constrained to transport/network observations
+
+Per §6 above, hardware adapters MAY implement the duck-typed `gossip()` / `onGossip()` side-channel. The gossip payloads MUST be limited to transport/network observations:
+
+- ✅ Acceptable: `PEER_SEEN`, `PEER_REACHABLE`, `RESOURCE_REPORT`, `CAPABILITY_ADVERTISEMENT`, `FORWARDING_OPPORTUNITY`.
+- ❌ Forbidden: `IDENTITY_ASSERTION`, `TRUST_ASSERTION`, `DELIVERY_STATE`, `AUTHZ_GRANT`, `BUNDLE_VARIANT`, `VERIFICATION_ASSERTION`.
+
+A hardware adapter that introduces a forbidden gossip payload kind is an automatic architecture-control defect (§13 below). The architecture boundary tests will be extended in P4.7 with a static AST scan enforcing this.
+
+### §12. (S0.2.6 — strengthened) RELAY_FORWARD proof authority is forwarding evidence ONLY
+
+A `RELAY_FORWARD` proof (ARCH-023) signed by a relay's Ed25519 key proves EXACTLY:
+
+- The relay observed bundle `bundle_id` arriving from `from_node_id` on `transport` at time `ts`.
+- The relay attempted to forward it to `to_node_id`.
+- The relay's identity (the signing pubkey).
+
+The `RELAY_FORWARD` proof does NOT prove:
+
+- Sender authority (that is `SENDER_SIGNATURE` — separate proof, separate key).
+- Recipient verification (that is the `IdentityGraph` + `VerificationState` machine — Articles II, XIV, XV).
+- Trust endorsement (that is the `verification` ladder — `UNVERIFIED` / `PEER_CORROBORATED` / `TRUSTED`).
+- Authorization grant (that is `authorizeNode` / `authorizeByVisibility` — Articles XII–XIV).
+- Bundle content endorsement (the relay cannot decrypt — THREAT_MODEL §1).
+
+The `RELAY_FORWARD` proof is at the BOTTOM of the authority hierarchy:
+
+```
+Intent (Article III) → Identity (Article II) → Bundle (Article IV) → Routing (Article V) → Transport (Article I.2) → RELAY_FORWARD proof
+```
+
+A hardware adapter that signs `RELAY_FORWARD` proofs asserting higher-layer authority is an automatic architecture-control defect.
+
+### §13. (S0.2.6 — strengthened) StoredBundle contract is ONE protocol contract, many persistence impls
+
+The `BundleStore` interface (defined in `src/server/NodeRuntime.ts`) is the protocol-level contract. Persistence implementations (Prisma/PostgreSQL for web build, Room/SQLite for Android, in-memory for tests) MUST satisfy these cross-impl invariants:
+
+- **P1**: `(bundle_id, node_id)` is the unique key (UPSERT semantics).
+- **P2**: `ReceivedBundle` is keyed by `(node_id, bundle_id)`; deduplication is based on `bundle_id` ONLY.
+- **P3**: TTL sweeper transitions `QUEUED` → `EXPIRED` idempotently via `DeliveryTracker.transition()`.
+- **P4**: Every state change goes through `DeliveryTracker.transition()`; persistence impls MUST NOT write to `state` directly.
+- **P5**: When a relay forwards, only `proofs[]` is appended; no other bundle field changes.
+- **P6**: Crash mid-write leaves the DB consistent (transactions / WAL).
+- **P7**: Schema migrations are forward-only, recorded in `schema_migrations`.
+
+A persistence impl that violates any P-invariant is an automatic architecture-control defect. The Android `AndroidBundleStore` MUST satisfy P1-P7 — it is NOT a "mirror" of the Postgres schema, it is a separate impl of the same contract.
+
+### §14. Violations are architecture-control defects
 
 Any violation of Article XVIII is automatically an architecture-control defect per Article X. The implementation MUST be reverted, the design MUST be revised, and the violation MUST be recorded in the worklog with a root-cause analysis before resuming.
 
@@ -511,9 +578,21 @@ Specifically:
 - A hardware adapter that decrypts bundle payloads → revert, treat bundles as opaque bytes.
 - A hardware adapter that imports from `@/adapters/*` or `@/matrix/*` → revert, restructure.
 - A hardware adapter that modifies any frozen invariant in §4 → revert, file an Architecture Change Proposal per `CHANGE_CONTROL.md`.
+- A hardware adapter that introduces forbidden gossip payload kinds (§11) → revert, restructure gossip to use acceptable kinds.
+- A hardware adapter that uses transport framing to encode protocol semantics (§10) → revert, framing is ephemeral.
+- A hardware adapter that signs RELAY_FORWARD proofs asserting higher-layer authority (§12) → revert, RELAY_FORWARD proves forwarding evidence only.
+- A persistence impl that violates any P-invariant (§13) → revert, fix the impl to satisfy the protocol contract.
 
-### §10. History
+### §15. History
 
-This article is added in P4-DESIGN, preceding the P4 implementation sprint. The motivation: hardware adapters are the first transport-layer code that interacts with platform-specific APIs (BluetoothLeScanner, WifiP2pManager, etc.). Without an explicit hardware-boundary article, an adapter could in principle "optimize" by reformatting bundles, looking up identities, signing on behalf of the sender, etc. — each of which would silently violate a higher-layer article. Article XVIII makes the boundary explicit and the violations detectable by static analysis (architecture boundary tests).
+This article is added in P4-DESIGN (commit `7e64db3`), preceding the P4 implementation sprint. S0.2.6 (commit pending) strengthens it with §9-§13 in response to the architecture reviewer's 8-point review of the original P4-DESIGN:
+
+- §9 (two-layer encryption) addresses reviewer point 4.
+- §10 (transport framing) addresses reviewer point 3.
+- §11 (gossip boundary) addresses reviewer point 6.
+- §12 (RELAY_FORWARD authority) addresses reviewer point 5.
+- §13 (StoredBundle contract) addresses reviewer point 7.
+
+The motivation: hardware adapters are the first transport-layer code that interacts with platform-specific APIs (BluetoothLeScanner, WifiP2pManager, etc.). Without an explicit hardware-boundary article, an adapter could in principle "optimize" by reformatting bundles, looking up identities, signing on behalf of the sender, etc. — each of which would silently violate a higher-layer article. Article XVIII makes the boundary explicit and the violations detectable by static analysis (architecture boundary tests).
 
 The article was authored before any hardware adapter code was written. P4.1 (BLE adapter) is the first implementation milestone governed by this article.
