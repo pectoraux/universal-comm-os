@@ -288,3 +288,66 @@ Stage Summary:
 - Execution evidence manifest: VALID (commit_sha == HEAD == origin/main HEAD == 5176da5).
 - S0.2.5 is COMPLETE per Article XVII. The execution evidence layer closes the last gap in the governance chain — Article XVI proved the tested code is identical to the repository code, but did not prove the test was actually executed. S0.2.5 adds the execution evidence layer that proves it.
 - P4 (Edge Transport Foundation — Android BLE / Wi-Fi Direct / local peer discovery / encrypted transport sessions / offline message exchange / relay participation) MAY NOW PROCEED, consuming the existing frozen protocol contracts (Bundle format, Identity verification, Authorization semantics, Trust model, Delivery state machine) without modification.
+
+---
+Task ID: P4-DESIGN
+Agent: main (super-z)
+Task: Produce the P4 (Edge Transport Foundation) architecture design document, add Article XVIII (Hardware Boundary Integrity) to the constitution, add ARCH-053 (Hardware adapters cannot redefine protocol semantics) to the ledger, and run the Repository Truth Gate in MAIN_MILESTONE mode to produce the Article XVII COMMIT REPORT. NO IMPLEMENTATION CODE — design only. Awaiting architecture review approval before P4.1 (BLE adapter) begins.
+
+Work Log:
+- Verified baseline state at S0.2.5 final commit 5b3dfb2: LOCAL HEAD == origin/main HEAD, worktree clean, 436 tests pass, tsc exit 0, execution evidence STATUS: VALID.
+- Audited the existing Transport interface in src/core/transport/Transport.ts: 4 methods (isAvailable / send / onReceive / close?), TransportSendResult is a 4-kind union (OK / UNAVAILABLE / NO_PEER / ERROR). The interface is the canonical surface every P4 transport MUST implement.
+- Audited the LoopbackTransport reference impl in src/transport/loopback/LoopbackTransport.ts: implements Transport + the duck-typed gossip()/onGossip() side-channel (ARCH-031). P4 BLE/Wi-Fi Direct adapters will follow the same pattern.
+- Audited core/capabilities/types.ts: TransportCapabilityType already includes BLE, WIFI, WIFI_AWARE, BLUETOOTH — no new capability types needed for P4. NodeCapabilities.resource already has battery_pct / bandwidth_bps / storage_bytes / compute_units — Android ResourceMonitor will populate these.
+- Audited core/routing/types.ts: RouteHop.kind already supports TRANSPORT (BLE/Wi-Fi Direct hops), RELAY (store-and-forward), GATEWAY (cross-network egress). P4 re-uses all three; no new RouteHopKind needed.
+- Wrote docs/architecture/P4_EDGE_TRANSPORT_ARCHITECTURE.md (14 sections, ~1000 lines):
+  - §0 Mission and Scope: defines what P4 does (BLE + Wi-Fi Direct transports for Android) and what it does NOT change (the 8 frozen invariants — CommunicationBundle / IdentityGraph / VerificationState / Authorization / Trust / Delivery / Repository Truth Gate / Execution Evidence Gate).
+  - §1 Android System Architecture: foreground service (CommOsService) hosting NodeRuntime, component layout in app/src/main/java/io/commos/edge/, TypeScript↔Kotlin bridge via React Native + JSI (re-uses existing TS code unchanged), 7 AndroidManifest permissions, lifecycle (MainActivity → startForegroundService → create NodeRuntime + 2 transports + sweeper).
+  - §2 Transport Abstraction Boundary: the Transport interface contract; what hardware adapters MAY do (implement the 4 methods, add gossip side-channel, report resources); what they MUST NOT do per Article XVIII (no new TransportSendResult kinds, no exceptions across boundary, no bundle decryption, no frozen invariant modification, no imports from @/adapters or @/matrix).
+  - §3 BLE Adapter Design: GATT service UUIDs (random v4 to avoid SIG range), 6 characteristics (Bundle Inbox/Outbox, Node ID, Capability Advertisements, MTU Negotiation Hint), bundle chunking (4-byte sequence + 1-byte flag headers, MTU-sized chunks), advertising packets (service UUID + 8-byte node_id hash + 1-byte battery hint), scanning (BluetoothLeScanner with ScanFilter on CommOS service UUID), connection limits (soft cap 4 to leave headroom), send/receive flow with chunked reassembly.
+  - §4 Wi-Fi Direct Adapter Design: topology (group owner + clients), service discovery (WifiP2pManager.discoverPeers + service info TXT record with node_id hash + battery hint), group formation (WifiP2pManager.connect with 30s timeout, max 3 retries), TCP server on GO port 7878 with 4-byte length prefix, group teardown on close() or peer drop.
+  - §5 Offline Store-and-Forward Flow: AndroidBundleStore backed by Room/SQLite mirroring the existing Prisma StoredBundle schema, store-and-forward flow when peer unreachable (NodeRuntime catches UNAVAILABLE/NO_PEER → stores bundle → TTL sweeper re-attempts), bundle dedup via canonical bundle_id, TTL sweeper every 60s with Doze mode handling.
+  - §6 Relay Node Behavior: Android node MAY advertise RELAY: STORE + FORWARD; RELAY_FORWARD proof signing via Android Keystore (Ed25519 signing key never leaves secure enclave); relay forwarding rules (no decrypt, no modify, honor TTL, verify sender signature, honor replication_factor); resource-aware relay advertise (battery > 50% → STORE+FORWARD; 20-50% → FORWARD only; ≤20% → OFF).
+  - §7 Security Model: per-transport key exchange (BLE LE Secure Connections, Wi-Fi Direct WPS), 4 BLE pairing models (Numeric Comparison > Passkey Entry > OOB > Just Works), replay protection via bundle_id canonical UUID + per-connection transport nonce, trust model unchanged (no new crypto).
+  - §8 Battery/Resource Model: power policy table by battery level (plugged / >50% / 20-50% / ≤20%) for BLE advertise interval, BLE scan window, Wi-Fi Direct discover interval, relay advertise; ResourceMonitor samples battery/storage/bandwidth every 30s and updates NodeCapabilities.resource; Doze mode behavior (suspend all radios, foreground service notification persists, BundleStore persists QUEUED bundles, resume on wake).
+  - §9 Failure Handling: 12 failure categories with handling rules (transient transport / peer unreachable / transport unavailable / connection drop / MTU negotiation failure / GATT service not found / pairing failure / Keystore access failure / storage exhausted / permission revoked / app killed / device reboot); exception discipline (Article XVIII §2 — transports MUST NOT throw across boundary, internal exceptions caught and translated to TransportSendResult ERROR); TransportEventSink logging; crash recovery via BundleStore + AndroidDeliveryTracker re-hydration.
+  - §10 Testing Strategy: test pyramid (unit / Robolectric / emulator e2e / hardware-in-the-loop / failure injection / cold start / architecture boundary / constitution); test fixtures (MockBleTransport + MockWifiDirectTransport implementing Transport + gossip side-channel); 10 acceptance criteria for P4 completion; out-of-scope tests (NFC, iOS, BLE mesh).
+  - §11 Frozen Invariants Cross-Reference: table proving each Article I-XVII is untouched by P4 (each row: invariant / article / touched? / why not).
+  - §12 Implementation Plan: 7 phases (P4.1 BLE adapter / P4.2 BLE e2e / P4.3 Wi-Fi Direct adapter / P4.4 AndroidBundleStore + DeliveryTracker / P4.5 PowerPolicy + ResourceMonitor / P4.6 Relay participation / P4.7 Article XVIII acceptance + final gate); per-phase governance (each phase ends with repo-truth-gate + evidence generator + evidence verifier + COMMIT REPORT in worklog); acceptance gate (10 criteria from §10.3 + MATCH: YES + STATUS: VALID).
+  - §13 Open Questions (7 questions for architecture review): React Native vs native Kotlin; BLE service UUID namespace; Wi-Fi Direct port 7878; foreground service subtype on Android 14+; ACCESS_FINE_LOCATION privacy; BLE mesh vs point-to-point; bundle chunking header size.
+  - §14 References: Articles I-XVII + Article XVIII (new); ARCH-001..052 + ARCH-053 (new); THREAT_MODEL.md; ROADMAP.md; src/core/transport/Transport.ts; src/transport/loopback/LoopbackTransport.ts; src/core/capabilities/types.ts; src/core/routing/types.ts; src/server/NodeRuntime.ts; prisma/schema.prisma.
+- Wrote Article XVIII (Hardware Boundary Integrity) into docs/architecture/ARCHITECTURE_CONSTITUTION.md. 10 sections:
+  - §1 Hardware adapters implement the Transport interface (4 methods, TransportSendResult union of 4 canonical kinds).
+  - §2 Hardware adapters MUST NOT throw across the interface boundary (internal exceptions caught and translated to ERROR).
+  - §3 Hardware adapters MUST NOT decrypt or interpret bundle contents (THREAT_MODEL §1, Article IX).
+  - §4 Hardware adapters MUST NOT touch frozen invariants (table of 9: CommunicationBundle / Universal Identity / IdentityGraph / VerificationState machine / Authorization / Trust / Delivery / Repository Truth Gate / Execution Evidence Gate).
+  - §5 Hardware adapter implementations live in src/transport/<name>/ (Article I.2 + boundaries-strict.test.ts enforcement).
+  - §6 Hardware adapters MAY implement the duck-typed gossip side-channel (ARCH-031, same pattern as LoopbackTransport).
+  - §7 Hardware adapters MAY report resources via the existing NodeCapabilities.resource field (ARCH-035).
+  - §8 Link-layer encryption INDEPENDENT of bundle end-to-end encryption (BLE LE Secure Connections / Wi-Fi Direct WPS for the link; bundle remains sealed by CryptoEnvelope end-to-end).
+  - §9 Violations are architecture-control defects (Article X) — 5 specific violation types enumerated with required remediation (revert + revise).
+  - §10 History (P4-DESIGN motivation — hardware adapters interact with platform APIs and could silently violate higher-layer articles without explicit boundary).
+- Wrote ARCH-053 in docs/architecture/ARCHITECTURE_LEDGER.md recording the architectural decision with cross-reference to Article XVIII and the P4 design doc.
+- Verified test suite + typecheck still pass: 436 tests pass, tsc exit 0, architecture boundary tests pass (no new src/ files added — only docs).
+- Committed at 7e64db388f2cd006de57d00bcd43feac4205d364. Pushed to GitHub main. The pre-push hook ran the Repository Truth Gate in PR_INTEGRITY mode (the pre-push hook from S0.2.4) — generated the execution evidence manifest, verified it (STATUS: VALID), accepted the push.
+- Verified post-push: LOCAL HEAD == origin/main HEAD == 7e64db388f2cd006de57d00bcd43feac4205d364. MATCH: YES. WORKTREE CLEAN: YES.
+- Ran the gate in MAIN_MILESTONE mode at this commit:
+  - bash scripts/repo-truth-gate.sh MAIN_MILESTONE P4-DESIGN
+  - MATCH: YES (local HEAD == origin/main HEAD == tested SHA).
+  - WORKTREE CLEAN: YES.
+  - TEST RESULT: 436 passed / 0 failed.
+  - ARCHITECTURE: 383 passed / 0 failed (FATAL).
+  - SECURITY: 11 passed / 0 failed (FATAL).
+  - TYPECHECK: PASS (FATAL).
+  - EXECUTION EVIDENCE STATUS: VALID (manifest at docs/verification/latest-execution.json, SHA 7e64db388f2cd006de57d00bcd43feac4205d364).
+
+Stage Summary:
+- Artifact: docs/architecture/P4_EDGE_TRANSPORT_ARCHITECTURE.md — full design doc with 14 sections covering Android system architecture, transport abstraction boundary, BLE adapter design, Wi-Fi Direct adapter design, offline store-and-forward flow, relay node behavior, security model, battery/resource model, failure handling, testing strategy, frozen invariants cross-reference, implementation plan, open questions, references.
+- Artifact: docs/architecture/ARCHITECTURE_CONSTITUTION.md — Article XVIII (Hardware Boundary Integrity) added with 10 sections.
+- Artifact: docs/architecture/ARCHITECTURE_LEDGER.md — ARCH-053 (Hardware adapters cannot redefine protocol semantics) added.
+- Test results: 436 passed (unchanged from S0.2.5; this commit is design-only — no new src/ or tests/ files). tsc --noEmit: exit 0, 0 errors.
+- Architecture subset: 383 passed (FATAL).
+- Security subset: 11 passed (FATAL).
+- Execution evidence manifest: VALID (commit_sha == HEAD == origin/main HEAD == 7e64db388f2cd006de57d00bcd43feac4205d364).
+- P4-DESIGN is COMPLETE per Article XVII. The architecture is reviewable.
+- Implementation is BLOCKED pending architecture review approval per the user's instruction. The 7 open questions in §13 are the items I would expect the reviewer to resolve before approving P4.1.
