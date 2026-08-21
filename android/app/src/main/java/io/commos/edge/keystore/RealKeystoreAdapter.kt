@@ -33,7 +33,7 @@ import java.security.Signature
 class RealKeystoreAdapter(
     private val keyAlias: String = "commos-ed25519-signing-key"
 ) {
-    private val keyStore: KeyStore = KeyStore.getInstance("AndroidKeychain").also { it.load(null) }
+    private val keyStore: KeyStore = KeyStore.getInstance("AndroidKeyStore").also { it.load(null) }
 
     // In-memory cache for the software Ed25519 keypair (API 26-32).
     // The key is loaded from storage on first use and cached for the
@@ -52,7 +52,7 @@ class RealKeystoreAdapter(
             // API 33+ — native Ed25519 in Keystore.
             val keyPairGenerator = java.security.KeyPairGenerator.getInstance(
                 KeyProperties.KEY_ALGORITHM_EC,
-                "AndroidKeychain"
+                "AndroidKeyStore"
             )
             val spec = KeyGenParameterSpec.Builder(
                 keyAlias,

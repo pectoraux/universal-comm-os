@@ -9,7 +9,7 @@
  *   - the TransportConformanceSuite's FakeTransport
  *
  * They are NOT used in production. Production deployments on Android
- * will provide real implementations backed by AndroidKeychain (Keystore)
+ * will provide real implementations backed by AndroidKeyStore (Keystore)
  * and BatteryManager + StorageStatsManager (ResourceReportSampler).
  *
  * Article X (No Fake Implementations) — these are explicitly named as
@@ -18,7 +18,7 @@
  *
  * R4 (P4 design §1.3.3) — Keystore boundary:
  *   The real Android impl would:
- *     - Store the Ed25519 secret key in AndroidKeychain (secure enclave).
+ *     - Store the Ed25519 secret key in AndroidKeyStore (secure enclave).
  *     - Use BiometricPrompt for key use authorization.
  *     - NOT cache the secret key in process memory beyond a single
  *       signature operation.
@@ -88,7 +88,7 @@ export class TestKeystoreAdapter implements KeystoreAdapter {
 
   /**
    * Test-only: assert that the secret key is NOT in plaintext app storage.
-   * (In the real Android impl, this would be enforced by AndroidKeychain.
+   * (In the real Android impl, this would be enforced by AndroidKeyStore.
    * Here, the secret key lives in process memory for the test's duration
    * only — the test framework asserts that no logs contain key material.)
    */

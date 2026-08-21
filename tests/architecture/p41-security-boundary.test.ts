@@ -153,7 +153,7 @@ describe('P4.1 — Security boundary', () => {
   });
 
   it('the runtime does NOT cache the signing secret key in plaintext app storage', () => {
-    // In the real Android impl, the secret key NEVER leaves AndroidKeychain.
+    // In the real Android impl, the secret key NEVER leaves AndroidKeyStore.
     // The TestKeystoreAdapter holds it in memory only — the test fixture
     // exposes assertNoPlaintextKeyInStorage() for documentation.
     const keystore = new TestKeystoreAdapter();

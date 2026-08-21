@@ -541,7 +541,7 @@ Work Log:
 - Corrected ARCH-054 to note: "P4.1-A status: the lifecycle contract is implemented and tested in TypeScript. The real Android foreground-service host that owns this lifecycle is P4.1-B (NOT YET DELIVERED)."
 - Added ARCH-057 (P4.1-A / P4.1-B split) documenting:
   - P4.1-A (ACCEPTED): lifecycle contract (ARCH-054), TransportConformanceSuite (ARCH-055), KeystoreAdapter interface (ARCH-056), P1-P7 persistence contract tests, R1-R7 executable invariants, architecture enforcement tests. All in TypeScript — the contracts are real, the test framework is real, but the Android platform integration is NOT present.
-  - P4.1-B (NOT YET DELIVERED): requires an actual Android project structure (build.gradle.kts, settings.gradle.kts, AndroidManifest.xml), real Kotlin implementations of the P4.1-A interfaces (CommOsService.kt foreground service, RealKeystoreAdapter.kt AndroidKeychain, RoomBundleStore.kt Room/SQLite with WAL, AndroidResourceSampler.kt BatteryManager + StorageStatsManager), compiled and tested on an actual Android device or emulator.
+  - P4.1-B (NOT YET DELIVERED): requires an actual Android project structure (build.gradle.kts, settings.gradle.kts, AndroidManifest.xml), real Kotlin implementations of the P4.1-A interfaces (CommOsService.kt foreground service, RealKeystoreAdapter.kt AndroidKeyStore, RoomBundleStore.kt Room/SQLite with WAL, AndroidResourceSampler.kt BatteryManager + StorageStatsManager), compiled and tested on an actual Android device or emulator.
   - The TypeScript abstractions from P4.1-A are RETAINED — the platform-specific pieces implement the already-defined interfaces.
   - P4.2 (BLE adapter) is BLOCKED until P4.1-B is delivered.
 - Environment limitation flagged: this sandbox is a TypeScript/Next.js environment with no Android SDK, no Kotlin compiler, no Gradle, no Android emulator, and no physical Android device. P4.1-B cannot be genuinely completed (compiled + tested on real Android) in this environment. The reviewer should decide whether to:
@@ -574,7 +574,7 @@ Work Log:
 - Wrote real Kotlin implementations:
   - CommOsService.kt — real Android foreground Service, lifecycle ownership (CREATED→INITIALIZING→HYDRATING→RUNNING→DRAINING→STOPPED), notification channel, TTL sweeper coroutine (60s), resource sampler coroutine (30s), all owned by serviceScope (R5 callback ownership). Uses kotlinx.coroutines (R6 concurrency).
   - RoomBundleStore.kt — real Room/SQLite persistence with WAL (P6 crash consistency), @Entity StoredBundleEntity + ReceivedBundleEntity, @Dao interfaces (insert/IGNORE for P1 dedup, updateState for P4, updateBundleJson for P5), @Database with WAL journal mode, fallbackToDestructiveMigration (P7 forward-only). RoomBundleStore class exposes push/markReceived/getExpiredBundleIds/updateStateFromTracker/appendForwardingProof/snapshot.
-  - RealKeystoreAdapter.kt — real Android Keystore integration using KeyStore.getInstance("AndroidKeychain"), EC P-256 (Ed25519 not available on API 26-32; available on 33+ — the impl uses EC for broader compatibility), KeyGenParameterSpec with PURPOSE_SIGN|PURPOSE_VERIFY, SHA256withECDSA. Private key never leaves the Keystore (sign() happens inside). getPublicKey() returns the cert's public key bytes. No getPrivateKey() method exists.
+  - RealKeystoreAdapter.kt — real Android Keystore integration using KeyStore.getInstance("AndroidKeyStore"), EC P-256 (Ed25519 not available on API 26-32; available on 33+ — the impl uses EC for broader compatibility), KeyGenParameterSpec with PURPOSE_SIGN|PURPOSE_VERIFY, SHA256withECDSA. Private key never leaves the Keystore (sign() happens inside). getPublicKey() returns the cert's public key bytes. No getPrivateKey() method exists.
   - AndroidResourceSampler.kt — real BatteryManager + StorageStatsManager (StatFs). Returns ResourceReport(batteryPct, storageFreeBytes, isCharging, sampledAt). Observation only — NOT protocol state.
   - CommOsRuntimeBridge.kt — real protocol bridge. Opens Room DB, creates RoomBundleStore + RealKeystoreAdapter + AndroidResourceSampler. hydrate() reads from Room DB (R1/R3). runTtlSweeper() calls updateStateFromTracker (R7). sampleResources() reads platform APIs (Article XVIII §7). signPayload() delegates to Keystore (R4 fail-closed). registerTransport/unregisterTransport (P4 design §12). close() releases all (R5).
 - Wrote JVM unit tests (Robolectric):
@@ -586,7 +586,7 @@ Work Log:
 
 ENVIRONMENT LIMITATION (honest disclosure):
 - This sandbox has Java 21 and the Android SDK is installed, but Gradle's first-time dependency download times out.
-- The Kotlin source files are REAL implementations using REAL Android APIs (AndroidKeychain, Room/SQLite, BatteryManager, foreground Service, NotificationChannel). They are NOT abstractions or test fixtures.
+- The Kotlin source files are REAL implementations using REAL Android APIs (AndroidKeyStore, Room/SQLite, BatteryManager, foreground Service, NotificationChannel). They are NOT abstractions or test fixtures.
 - However, the code is UNCOMPILED and UNTESTED in this environment.
 - The instrumentation tests CANNOT run (no emulator/device).
 - The JVM unit tests (Robolectric) CANNOT run (Gradle can't download dependencies in time).

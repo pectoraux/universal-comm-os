@@ -13,7 +13,7 @@
  * (Android devices via React Native + JSI, Node.js Mobile + N-API, or a
  * future Native Kotlin port — see P4 design §1.3.1). The runtime
  * abstraction is platform-independent; the platform-specific glue
- * (BluetoothLeScanner, WifiP2pManager, BatteryManager, AndroidKeychain)
+ * (BluetoothLeScanner, WifiP2pManager, BatteryManager, AndroidKeyStore)
  * is provided by an implementation of the `KeystoreAdapter` + 
  * `ResourceReportSampler` interfaces defined here.
  *
@@ -159,7 +159,7 @@ export interface KeystoreAdapter {
    * Returns a detached signature (64 bytes).
    *
    * Implementation MUST:
-   *   - Use the Android Keystore (`KeyStore.getInstance("AndroidKeychain")`)
+   *   - Use the Android Keystore (`KeyStore.getInstance("AndroidKeyStore")`)
    *     on real Android.
    *   - Prompt for biometric/device authentication if required.
    *   - NOT cache the secret key in process memory.
