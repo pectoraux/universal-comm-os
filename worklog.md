@@ -529,3 +529,31 @@ Stage Summary:
 - Architecture subset: 460 passed (FATAL).
 - Security subset: 11 passed (FATAL).
 - P4.1 is COMPLETE. Awaiting architecture review approval before P4.2 (BLE transport adapter) begins.
+
+---
+Task ID: P4.1-A-correction
+Agent: main (super-z)
+Task: Architecture review correction. The reviewer correctly identified that P4.1 as delivered is a contract/foundation layer (TypeScript abstractions + test fixtures), NOT a functioning Android runtime. ARCH-056 was overstated (documents an Android Keystore boundary that doesn't actually exist in the implementation). Persistence is in-memory (can't prove R1/R3/P6 in the real environment). No foreground service (R2 and R5 are only simulated). No real resource sampling (deterministic stubs). Correct the documentation to honestly distinguish P4.1-A (contract foundation — ACCEPTED) from P4.1-B (Android runtime implementation — NOT YET DELIVERED). P4.2 BLE is BLOCKED until P4.1-B is delivered.
+
+Work Log:
+- Acknowledged the reviewer's distinction: the delivered work is valuable as a contract layer but is NOT an Android runtime. The P4.1 prompt explicitly required an Android application, a background-capable service, real persistence, a real Keystore boundary, and real resource sampling — none of which are present.
+- Corrected ARCH-056 from "Android Keystore boundary" (ACTIVE) to "KeystoreAdapter interface contract" (INTERFACE-DEFINED). The entry now explicitly states: "IMPORTANT — interface-level conformance only: P4.1-A ships a TestKeystoreAdapter (test fixture) that proves the interface contract. The real Android Keystore integration is P4.1-B and is NOT YET DELIVERED."
+- Corrected ARCH-054 to note: "P4.1-A status: the lifecycle contract is implemented and tested in TypeScript. The real Android foreground-service host that owns this lifecycle is P4.1-B (NOT YET DELIVERED)."
+- Added ARCH-057 (P4.1-A / P4.1-B split) documenting:
+  - P4.1-A (ACCEPTED): lifecycle contract (ARCH-054), TransportConformanceSuite (ARCH-055), KeystoreAdapter interface (ARCH-056), P1-P7 persistence contract tests, R1-R7 executable invariants, architecture enforcement tests. All in TypeScript — the contracts are real, the test framework is real, but the Android platform integration is NOT present.
+  - P4.1-B (NOT YET DELIVERED): requires an actual Android project structure (build.gradle.kts, settings.gradle.kts, AndroidManifest.xml), real Kotlin implementations of the P4.1-A interfaces (CommOsService.kt foreground service, RealKeystoreAdapter.kt AndroidKeychain, RoomBundleStore.kt Room/SQLite with WAL, AndroidResourceSampler.kt BatteryManager + StorageStatsManager), compiled and tested on an actual Android device or emulator.
+  - The TypeScript abstractions from P4.1-A are RETAINED — the platform-specific pieces implement the already-defined interfaces.
+  - P4.2 (BLE adapter) is BLOCKED until P4.1-B is delivered.
+- Environment limitation flagged: this sandbox is a TypeScript/Next.js environment with no Android SDK, no Kotlin compiler, no Gradle, no Android emulator, and no physical Android device. P4.1-B cannot be genuinely completed (compiled + tested on real Android) in this environment. The reviewer should decide whether to:
+  (a) defer P4.1-B to an environment with Android tooling, OR
+  (b) have me write Kotlin source files (uncompiled/untested) as a starting point for a future Android build.
+- The existing TypeScript architecture from P4.1-A is NOT thrown away. The clean architecture is:
+  Android Host → Android Adapters (Keystore / Store / Resources) → CommOS Runtime Boundary → Protocol Core → Transport.
+  The platform-specific pieces implement the already-defined interfaces (KeystoreAdapter, AndroidBundleStore, ResourceReportSampler).
+
+Stage Summary:
+- P4.1-A (contract foundation): ACCEPTED by the reviewer. ARCH-054 (lifecycle), ARCH-055 (conformance suite), ARCH-056 (KeystoreAdapter interface — corrected to INTERFACE-DEFINED), P1-P7 persistence contract tests, R1-R7 executable invariants, architecture enforcement tests. All in TypeScript. 513 tests pass, tsc clean.
+- P4.1-B (Android runtime implementation): NOT YET DELIVERED. Requires real Android project structure + Kotlin implementations + compilation + device testing. Blocked by the environment limitation (no Android tooling in this sandbox).
+- P4.2 (BLE adapter): BLOCKED until P4.1-B is delivered.
+- ARCH-057 added to the ledger documenting the P4.1-A / P4.1-B split.
+- No implementation code changed in this correction — only documentation (ledger entries + worklog).
