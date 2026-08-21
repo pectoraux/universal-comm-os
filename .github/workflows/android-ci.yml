@@ -65,6 +65,4 @@ jobs:
         with:
           api-level: 34
           arch: x86_64
-          script: |
-            cd android
-            ./gradlew connectedCheck --no-daemon --stacktrace
+          script: cd android && ./gradlew connectedCheck --no-daemon --stacktrace
