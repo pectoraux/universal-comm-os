@@ -65,4 +65,7 @@ jobs:
         with:
           api-level: 34
           arch: x86_64
-          script: cd android && ./gradlew connectedCheck --no-daemon --stacktrace
+          script: |
+            adb wait-for-device
+            adb shell 'while [[ -z $(pm path android) ]]; do sleep 1; done'
+            cd android && ./gradlew connectedCheck --no-daemon --stacktrace
