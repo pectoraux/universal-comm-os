@@ -28,7 +28,7 @@ jobs:
       # S0.2.4 — typecheck is now FATAL. Previously `continue-on-error: true`
       # allowed type drift to accumulate while tests passed. Removing the
       # continue-on-error makes typecheck a gate failure.
-      - name: Typecheck (FATAL — was previously continue-on-error: true)
+      - name: "Typecheck (FATAL — was previously continue-on-error: true)"
         run: npx tsc --noEmit
 
       # S0.2.4 — architecture tests are FATAL in CI too (not just in the gate script).
