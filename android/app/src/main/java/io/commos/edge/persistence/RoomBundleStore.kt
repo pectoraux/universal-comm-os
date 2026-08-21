@@ -106,9 +106,14 @@ abstract class CommOsDatabase : RoomDatabase() {
         private var INSTANCE: CommOsDatabase? = null
 
         /**
-         * P6 — crash consistency: WAL (Write-Ahead Logging) is the default
-         * journal mode in Room. A crash mid-write leaves the previous state
-         * intact; the WAL is replayed on restart.
+         * P6 — crash consistency: WAL (Write-Ahead Logging).
+         * A crash mid-write leaves the previous state intact; the WAL
+         * is replayed on restart.
+         *
+         * H4 FIX — removed fallbackToDestructiveMigration(). This is a
+         * DTN store — destroying the database can destroy queued bundles,
+         * delivery state, deduplication state, and forwarding evidence.
+         * Migrations MUST be explicit and forward-only (P7).
          */
         fun get(context: android.content.Context, nodeId: String): CommOsDatabase {
             return INSTANCE ?: synchronized(this) {
@@ -117,9 +122,11 @@ abstract class CommOsDatabase : RoomDatabase() {
                     CommOsDatabase::class.java,
                     "commos-$nodeId.db"
                 )
-                // P6 — WAL mode for crash consistency.
                 .setJournalMode(JournalMode.WRITE_AHEAD_LOGGING)
-                .fallbackToDestructiveMigration() // P7 — forward-only
+                // H4 FIX: NO fallbackToDestructiveMigration(). Explicit
+                // migrations only. If a migration is missing, the build
+                // fails with an IllegalStateException — NOT silent data loss.
+                .addMigrations() // no migrations yet (v1); future v2 adds a Migration(1, 2)
                 .build()
                 INSTANCE = db
                 db

@@ -17,112 +17,105 @@ import kotlinx.coroutines.launch
 import java.util.concurrent.atomic.AtomicReference
 
 /**
- * P4.1-B — Real Android Foreground Service hosting the CommOS runtime.
+ * P4.1-B-H — Real Android Foreground Service hosting the CommOS runtime.
+ *
+ * H6 FIX: Uses the canonical lifecycle transition mechanism (ARCH-054).
+ * The service does NOT directly assign lifecycle strings — it calls
+ * transitionLifecycle() which enforces the forward-only transitions.
  *
  * ARCH-054 (Android runtime lifecycle is canonical):
  *   CREATED → INITIALIZING → HYDRATING → RUNNING → DRAINING → STOPPED
  *
- * This service owns the Android lifecycle. It is NOT a second delivery state
- * machine — per-bundle delivery is owned by DeliveryTracker.transition()
- * (Article VI). The service's lifecycle maps to the ARCH-054 lifecycle:
- *
- *   onCreate()           → CREATED → INITIALIZING → HYDRATING
- *   onUnbind()/onDestroy() → DRAINING → STOPPED
- *
  * R1 — Process death recovery: the service re-hydrates from the Room
  *      database on restart (RoomBundleStore.snapshot()).
  * R2 — Background execution: foreground service, persistent notification.
- * R5 — Callback ownership: all coroutines + timers are owned by
- *      serviceScope; on destroy, all are cancelled.
- * R6 — Concurrency safety: single CoroutineScope (Dispatchers.Default),
- *      no concurrent state mutations.
+ * R5 — Callback ownership: all coroutines owned by serviceScope; on
+ *      destroy, all are cancelled.
+ * R6 — Concurrency safety: single CoroutineScope (Dispatchers.Default).
  */
 class CommOsService : Service() {
 
     companion object {
         const val CHANNEL_ID = "commos_runtime"
         const val NOTIFICATION_ID = 1
-
-        // The current lifecycle state (observable for tests).
-        // AtomicReference for R6 — concurrency safety.
         val lifecycleState = AtomicReference("CREATED")
     }
 
     private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
     private var ttlSweeperJob: Job? = null
     private var resourceSamplerJob: Job? = null
+    private var runtimeBridge: io.commos.edge.bridge.CommOsRuntimeBridge? = null
 
-    // The runtime host (from P4.1-A, re-hydrated on startup).
-    private var runtimeHost: CommOsRuntimeBridge? = null
+    // H6 — canonical lifecycle transition function.
+    // Same forward-only graph as the TypeScript ARCH-054 implementation.
+    private fun transitionLifecycle(to: String): Boolean {
+        val from = lifecycleState.get()
+        val valid = when (from to to) {
+            "CREATED" to "INITIALIZING" -> true
+            "INITIALIZING" to "HYDRATING" -> true
+            "HYDRATING" to "RUNNING" -> true
+            "RUNNING" to "DRAINING" -> true
+            "DRAINING" to "STOPPED" -> true
+            else -> false // no skipping, no backward (ARCH-054)
+        }
+        if (!valid) return false
+        lifecycleState.set(to)
+        return true
+    }
 
     override fun onCreate() {
         super.onCreate()
 
-        // Create notification channel (Android 8.0+).
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             val channel = NotificationChannel(
-                CHANNEL_ID,
-                "CommOS Runtime",
+                CHANNEL_ID, "CommOS Runtime",
                 NotificationManager.IMPORTANCE_LOW
-            ).apply {
-                description = "Manages offline communication bundles"
-            }
-            val manager = getSystemService(NotificationManager::class.java)
-            manager.createNotificationChannel(channel)
+            ).apply { description = "Manages offline communication bundles" }
+            getSystemService(NotificationManager::class.java)
+                .createNotificationChannel(channel)
         }
 
-        // Start as foreground service (R2 — background execution).
         startForeground(NOTIFICATION_ID, createNotification())
 
-        // Lifecycle: CREATED → INITIALIZING → HYDRATING
-        lifecycleState.set("INITIALIZING")
+        // H6 — CREATED → INITIALIZING (canonical transition)
+        transitionLifecycle("INITIALIZING")
 
         serviceScope.launch {
             try {
                 // R3 — deterministic rehydration from durable state ONLY.
-                // NOT from BLE/network/UI callbacks.
-                lifecycleState.set("HYDRATING")
-                runtimeHost = CommOsRuntimeBridge(applicationContext)
-                runtimeHost?.hydrate()
+                runtimeBridge = io.commos.edge.bridge.CommOsRuntimeBridge(applicationContext)
+                // H6 — INITIALIZING → HYDRATING
+                transitionLifecycle("HYDRATING")
+                runtimeBridge?.hydrate() // R1, R3 — re-hydrate from Room DB
 
-                // Lifecycle: HYDRATING → RUNNING
-                lifecycleState.set("RUNNING")
+                // H6 — HYDRATING → RUNNING
+                transitionLifecycle("RUNNING")
 
-                // R2 — start background work (TTL sweeper + resource sampling).
+                // R2 — start background work
                 startBackgroundWork()
             } catch (e: Exception) {
-                // Fail-closed — the runtime is NOT in RUNNING state.
+                // Fail-closed — runtime is NOT in RUNNING state.
                 lifecycleState.set("STOPPED")
             }
         }
     }
 
-    /**
-     * R2 — Background execution: TTL sweeper (60s) + resource sampler (30s).
-     * All work is owned by serviceScope (R5 — callback ownership).
-     */
     private fun startBackgroundWork() {
-        // TTL sweeper — transitions QUEUED bundles to EXPIRED via the
-        // canonical DeliveryTracker.transition() (R7 — delivery authority).
         ttlSweeperJob = serviceScope.launch {
             while (lifecycleState.get() == "RUNNING") {
                 delay(60_000)
-                runtimeHost?.runTtlSweeper()
+                runtimeBridge?.runTtlSweeper() // H3 — via DeliveryTracker
             }
         }
-
-        // Resource sampler — observations only, NOT protocol state
-        // (Article XVIII §7).
         resourceSamplerJob = serviceScope.launch {
             while (lifecycleState.get() == "RUNNING") {
                 delay(30_000)
-                runtimeHost?.sampleResources()
+                runtimeBridge?.sampleResources() // H10 — observation only
             }
         }
     }
 
     override fun onUnbind(intent: Intent?): Boolean {
-        // Lifecycle: RUNNING → DRAINING → STOPPED
         shutdown()
         return false
     }
@@ -137,21 +130,22 @@ class CommOsService : Service() {
      * persistence handles, transport registrations.
      */
     private fun shutdown() {
-        lifecycleState.set("DRAINING")
+        // H6 — RUNNING → DRAINING → STOPPED (canonical transitions)
+        transitionLifecycle("DRAINING")
         ttlSweeperJob?.cancel()
         resourceSamplerJob?.cancel()
-        runtimeHost?.close()
+        runtimeBridge?.close()
         serviceScope.cancel()
-        lifecycleState.set("STOPPED")
+        transitionLifecycle("STOPPED")
     }
 
     override fun onBind(intent: Intent?): IBinder? = null
 
     private fun createNotification(): Notification {
-        val builder = Notification.Builder(this, CHANNEL_ID)
+        return Notification.Builder(this, CHANNEL_ID)
             .setContentTitle("CommOS is running")
             .setContentText("Managing offline communication bundles")
             .setSmallIcon(android.R.drawable.ic_dialog_info)
-        return builder.build()
+            .build()
     }
 }

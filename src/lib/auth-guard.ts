@@ -1,5 +1,3 @@
-'use server';
-
 /**
  * lib/auth-guard.ts — S0-4/S0-5/S0-7
  *

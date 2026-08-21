@@ -60,6 +60,10 @@ dependencies {
     // JSON serialization (canonical CommunicationBundle)
     implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.6.2")
 
+    // H2 — Ed25519 software fallback for API 26-32 (Bouncy Castle).
+    // API 33+ uses the hardware-backed Android Keystore Ed25519.
+    implementation("org.bouncycastle:bcprov-jdk18on:1.77")
+
     // JVM unit tests (Robolectric for Android framework simulation)
     testImplementation("junit:junit:4.13.2")
     testImplementation("org.robolectric:robolectric:4.11.1")
