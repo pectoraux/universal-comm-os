@@ -175,7 +175,40 @@ fi
 
 MATCH=YES
 
-# ─── 8. Files added/modified in HEAD vs HEAD~1 ────────────────────────────
+# ─── 8. Generate execution evidence (S0.2.5 / Article XVII / ARCH-052) ────
+# The gate re-runs the validation commands AND generates a manifest that
+# records the actual exit codes. The manifest is written to
+# docs/verification/latest-execution.json (gitignored — it's a generated
+# artifact, not a tracked source file).
+EVIDENCE_PATH="docs/verification/latest-execution.json"
+EVIDENCE_SHA="(not generated)"
+EVIDENCE_STATUS="INVALID"
+
+if [ -x scripts/generate-execution-evidence.sh ]; then
+  # The generator re-runs the validation commands and records their actual
+  # exit codes. We capture the generator's stdout in a log file so the gate
+  # can report evidence status without polluting the COMMIT REPORT.
+  EVIDENCE_LOG="$TMPDIR/evidence.log"
+  if bash scripts/generate-execution-evidence.sh "$MILESTONE" > "$EVIDENCE_LOG" 2>&1; then
+    EVIDENCE_SHA="$LOCAL_HEAD"
+    # Verify the manifest immediately.
+    if bash scripts/verify-execution-evidence.sh >> "$EVIDENCE_LOG" 2>&1; then
+      EVIDENCE_STATUS="VALID"
+    else
+      EVIDENCE_STATUS="INVALID (verification failed)"
+      tail -5 "$EVIDENCE_LOG" >&2 || true
+    fi
+  else
+    EVIDENCE_SHA="$LOCAL_HEAD"
+    EVIDENCE_STATUS="INVALID (generation failed)"
+    tail -5 "$EVIDENCE_LOG" >&2 || true
+  fi
+else
+  echo "WARN: scripts/generate-execution-evidence.sh not executable — skipping execution evidence generation (Article XVII)." >&2
+  EVIDENCE_STATUS="INVALID (generator not found)"
+fi
+
+# ─── 9. Files added/modified in HEAD vs HEAD~1 ────────────────────────────
 FILES_ADDED=$(git show --stat --name-status HEAD 2>/dev/null | grep -E '^A' | awk '{print $2}' | sort | tr '\n' ',' | sed 's/,$//' || true)
 FILES_MODIFIED=$(git show --stat --name-status HEAD 2>/dev/null | grep -E '^[MCDR]' | awk '{print $2}' | sort | tr '\n' ',' | sed 's/,$//' || true)
 
@@ -196,6 +229,11 @@ printf 'ARCHITECTURE:   %s passed / %s failed (FATAL)\n' "$ARCH_PASS" "$ARCH_FAI
 printf 'SECURITY:       %s passed / %s failed (FATAL)\n' "$SEC_PASS" "$SEC_FAIL"
 printf 'TYPECHECK:       %s (FATAL)\n' "$TYPECHECK"
 printf '\n'
+printf 'EXECUTION EVIDENCE (S0.2.5 / Article XVII / ARCH-052):\n'
+printf '  PATH:   %s\n' "$EVIDENCE_PATH"
+printf '  SHA:    %s\n' "$EVIDENCE_SHA"
+printf '  STATUS: %s\n' "$EVIDENCE_STATUS"
+printf '\n'
 printf 'FILES ADDED:    %s\n' "${FILES_ADDED:-<none>}"
 printf 'FILES MODIFIED: %s\n' "${FILES_MODIFIED:-<none>}"
 printf '\n'
@@ -205,12 +243,24 @@ if [ "$MODE" = "MAIN_MILESTONE" ]; then
   printf '  git ls-tree -r origin/main --name-only    # list every file at origin/main\n'
   printf '  git show origin/main:<path>              # retrieve the exact bytes\n'
   printf '  git rev-parse origin/main                # confirm the SHA reported here\n'
+  printf '  cat docs/verification/latest-execution.json  # inspect the execution evidence manifest\n'
+  printf '  bash scripts/verify-execution-evidence.sh   # verify the manifest\n'
 else
   printf 'Reviewer verification (PR_INTEGRITY):\n'
   printf '  git rev-parse HEAD                       # the checked-out SHA\n'
   printf '  git show HEAD:<path>                     # retrieve the exact bytes\n'
   printf '  Note: origin/main equality is NOT required in PR_INTEGRITY mode.\n'
+  printf '  cat docs/verification/latest-execution.json  # inspect the execution evidence manifest\n'
+  printf '  bash scripts/verify-execution-evidence.sh   # verify the manifest\n'
 fi
 printf '\n'
+
+# S0.2.5: A milestone reported COMPLETE without VALID execution evidence is
+# automatically INVALID (Article XVII). Exit non-zero if evidence is not VALID
+# — this forces the agent to regenerate before claiming completion.
+if [ "$EVIDENCE_STATUS" != "VALID" ]; then
+  echo "FAIL: execution evidence is $EVIDENCE_STATUS (Article XVII requires VALID)." >&2
+  exit 1
+fi
 
 exit 0

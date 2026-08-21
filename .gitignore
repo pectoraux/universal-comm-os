@@ -52,3 +52,19 @@ prompt
 server.log
 # Skills directory
 /skills/.env
+
+# S0.2.5 (Article XVII / ARCH-052) — execution evidence manifests.
+# The manifest is a GENERATED artifact, not a tracked source file. The
+# verifier requires manifest.commit_sha == git rev-parse HEAD; if the
+# manifest were committed as a tracked file, the act of committing it
+# would advance HEAD and invalidate the manifest (manifest.commit_sha
+# would describe the PREVIOUS commit, not the manifest commit).
+#
+# The directory docs/verification/ is tracked (via README.md files in
+# docs/verification/ and docs/verification/history/) so the structure
+# exists in the repo. The manifest files themselves are gitignored
+# and produced by scripts/generate-execution-evidence.sh (locally) or
+# the execution-evidence CI job (in CI, uploaded as an Actions artifact
+# with 30-day retention).
+/docs/verification/latest-execution.json
+/docs/verification/history/*.json

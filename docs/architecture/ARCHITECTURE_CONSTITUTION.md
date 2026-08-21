@@ -275,3 +275,138 @@ A milestone reported COMPLETE without satisfying Article XVI is automatically IN
 This article was added in S0.2.3 in response to the S0.2.2 governance failure: the agent reported "All 259 tests pass / S0.2.2 is complete" while the implementation existed only in the local working tree and had not been pushed to GitHub `main`. The reviewer's independent check of the authoritative branch proved the claimed `IdentityLinkStateMachine.ts` returned 404 and the claimed `VerificationState` vocabulary was still the old 3-state `UNVERIFIED | VERIFIED | REVOKED`. The fix is not merely pushing the work — it is preventing the asymmetry from recurring.
 
 S0.2.4 extended the gate with two modes (MAIN_MILESTONE and PR_INTEGRITY), made architecture tests FATAL (was `|| true`), made security tests a FATAL dedicated subset, made typecheck FATAL (was `continue-on-error: true`), and added the branch-protection self-enforcement layer (the GitHub API returns 403 on the private repo without GitHub Pro — compensated by pre-push hooks + CI gating).
+
+## Article XVII — Execution Evidence Integrity (S0.2.5)
+
+A milestone completion claim requires not only repository truth (Article XVI) but execution evidence. A passing test result without a recorded command, environment, commit SHA, and timestamp is not considered validated.
+
+Article XVI proved that the tested code is identical to the repository code. Article XVII proves that the test was actually run, in a real environment, with real commands, producing real results — and that the evidence artifact corresponding to that run is durable and independently verifiable.
+
+### Required principle
+
+For any milestone (S0.X, Pn) reported COMPLETE, the agent MUST produce a machine-generated execution evidence manifest that records:
+
+1. **What commit was tested** — the exact `git rev-parse HEAD` at the time of execution.
+2. **What environment tested it** — operating system, Node.js version, package manager, runtime.
+3. **What commands were executed** — the exact commands (with arguments) and their exit codes.
+4. **Whether they succeeded** — every required command must have exit code 0; any non-zero exit code invalidates the manifest.
+5. **Whether the evidence corresponds to the repository state** — the manifest's `commit_sha` must equal `git rev-parse HEAD` AND `git rev-parse origin/main HEAD` (for MAIN_MILESTONE mode) at verification time.
+
+### Evidence manifest format (ARCH-052)
+
+The manifest is a JSON document stored at `docs/verification/latest-execution.json`. It MUST contain the following fields (in this exact order for readability — JSON object key order is preserved by the generator):
+
+```json
+{
+  "milestone": "",
+  "commit_sha": "",
+  "repository": "",
+  "branch": "",
+  "timestamp": "",
+  "environment": {
+    "os": "",
+    "node": "",
+    "package_manager": "",
+    "runtime": ""
+  },
+  "commands": [
+    {
+      "command": "",
+      "exit_code": 0,
+      "duration_ms": 0
+    }
+  ],
+  "results": {
+    "tests": "",
+    "architecture": "",
+    "security": "",
+    "typecheck": ""
+  }
+}
+```
+
+Field semantics:
+- `milestone`: the milestone ID (e.g., `"S0.2.5"`). MUST match the milestone ID in the gate script invocation.
+- `commit_sha`: the full 40-character SHA-1 of `git rev-parse HEAD` at execution time.
+- `repository`: the canonical repository URL with credentials stripped (e.g., `"https://github.com/pectoraux/universal-comm-os"`).
+- `branch`: the current branch name (e.g., `"main"`).
+- `timestamp`: ISO-8601 UTC with timezone offset (e.g., `"2026-08-20T18:00:00+00:00"`).
+- `environment.os`: the OS identifier (e.g., `"Linux x86_64"`).
+- `environment.node`: the Node.js version (e.g., `"v20.10.0"`).
+- `environment.package_manager`: the package manager identifier (e.g., `"bun 1.1.x"`).
+- `environment.runtime`: the runtime identifier (e.g., `"vitest 4.1.x"`).
+- `commands[]`: the ordered list of commands executed. Each entry has `command` (the exact shell command), `exit_code` (integer; 0 = success), `duration_ms` (integer; wall-clock duration).
+- `results.tests`: summary string (e.g., `"344 passed / 0 failed"`).
+- `results.architecture`: summary string.
+- `results.security`: summary string.
+- `results.typecheck`: summary string (e.g., `"PASS"` or `"FAIL"`).
+
+### Generation rules
+
+The evidence generator (`scripts/generate-execution-evidence.sh`) MUST:
+
+1. Run only AFTER the Repository Truth Gate has succeeded. The generator refuses to run if the gate has not been invoked or has failed.
+2. Capture `commit_sha`, `branch`, `repository`, `timestamp`, and `environment` from the live system at the moment of generation.
+3. Re-execute the required validation commands (test suite, architecture tests, security tests, typecheck) and record their actual exit codes and durations — NOT the codes from a prior gate run. This ensures the manifest reflects a real execution, not a stale state.
+4. Write the manifest to `docs/verification/latest-execution.json` (overwriting the previous latest).
+5. Copy the manifest to `docs/verification/history/<milestone>-<short-sha>-<timestamp>.json` for archival.
+6. Exit 0 if all required commands succeeded; exit 1 otherwise (the manifest is still written — a failed manifest is also evidence — but the gate's COMMIT REPORT will note `EXECUTION EVIDENCE STATUS: INVALID`).
+7. Refuse to generate a manifest if the worktree is dirty (the manifest's commit_sha must correspond to a real commit, not a working-tree snapshot).
+
+### Verification rules
+
+The evidence verifier (`scripts/verify-execution-evidence.sh`) MUST:
+
+1. Check that `docs/verification/latest-execution.json` exists.
+2. Parse it as JSON.
+3. Verify all required fields are present and non-empty.
+4. Verify `commit_sha` equals `git rev-parse HEAD` (the manifest corresponds to the current commit).
+5. Verify `repository` matches the current `origin` URL (credentials stripped).
+6. Verify every `commands[].exit_code` is 0 (no failed commands).
+7. Verify `timestamp` parses as ISO-8601 and is within the last 30 days (stale manifests are invalid).
+8. Verify `results.typecheck` is `"PASS"`.
+9. Verify `results.tests`, `results.architecture`, `results.security` each contain `"passed"` with a non-zero count and `"0 failed"`.
+10. Exit 0 if all checks pass; exit 1 otherwise (with a specific error message identifying the failed check).
+
+### Invalidation conditions
+
+A previously valid manifest becomes INVALID when any of the following occur:
+
+1. `git rev-parse HEAD` no longer equals `manifest.commit_sha` (the repository advanced past the manifest's commit).
+2. `git remote get-url origin` (credentials stripped) no longer equals `manifest.repository` (the remote changed).
+3. More than 30 days have elapsed since `manifest.timestamp` (the evidence is stale).
+4. Any required command's `exit_code` is non-zero (the manifest records a failure — even if the gate later passed, the manifest is evidence of the failure).
+5. Any required field is missing or empty.
+6. The manifest fails JSON parsing.
+7. The manifest's `milestone` field does not match the milestone ID being claimed in the COMMIT REPORT.
+
+An invalid manifest does NOT invalidate the milestone — the agent can regenerate the manifest by re-running the gate. But the agent MUST NOT report "milestone complete" while the manifest is invalid; the report must disclose `EXECUTION EVIDENCE STATUS: INVALID` and regenerate.
+
+### CI enforcement
+
+A new `execution-evidence` job in `.github/workflows/ci.yml` (S0.2.5) runs on `push: branches: [main]` and `pull_request: branches: [main]`. The job:
+
+1. Depends on the `repo-truth-gate-main` (or `repo-truth-gate-pr`) job having succeeded.
+2. Runs `scripts/generate-execution-evidence.sh` to produce `docs/verification/latest-execution.json`.
+3. Runs `scripts/verify-execution-evidence.sh` to verify the manifest.
+4. Uploads the manifest as a GitHub Actions artifact (`execution-evidence`) with a 30-day retention.
+5. Fails the build if evidence generation or verification fails.
+
+The job does NOT weaken existing gates — it runs AFTER them and adds a new required check.
+
+### Commit report extension
+
+The Article XVI COMMIT REPORT is extended with an `EXECUTION EVIDENCE` block:
+
+```
+EXECUTION EVIDENCE:
+  PATH:   docs/verification/latest-execution.json
+  SHA:    <the commit_sha in the manifest>
+  STATUS: VALID | INVALID
+```
+
+A milestone reported COMPLETE without `EXECUTION EVIDENCE STATUS: VALID` is automatically INVALID per Article XVII.
+
+### History
+
+This article was added in S0.2.5 to close the last gap in the governance chain: Article XVI proved the tested code is identical to the repository code, but did not prove that the test was actually executed in a real environment with real commands. An agent could in principle report "tests passed at SHA X" without ever running them. The execution evidence manifest — generated by a script that re-runs the commands and records their actual exit codes — makes that gap impossible. The manifest is committed to the repository (in `docs/verification/latest-execution.json` and `docs/verification/history/`) so reviewers can independently inspect it.
