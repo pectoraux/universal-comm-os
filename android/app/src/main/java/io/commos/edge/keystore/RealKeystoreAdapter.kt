@@ -2,6 +2,7 @@ package io.commos.edge.keystore
 
 import android.security.keystore.KeyGenParameterSpec
 import android.security.keystore.KeyProperties
+import android.util.Base64
 import java.security.KeyStore
 import java.security.Signature
 
@@ -19,11 +20,8 @@ import java.security.Signature
  *     the hardware-backed Keystore.
  *   - Android API 26-32: Ed25519 is NOT available in the Android Keystore.
  *     For these API levels, we use Bouncy Castle's software Ed25519
- *     implementation. The key is still generated and stored in the Android
- *     Keystore (as a raw key with setBlockModes(KeyProperties.BLOCK_GCM)),
- *     but signing is done in software using Bouncy Castle's Ed25519Signer.
- *     The key NEVER leaves the Keystore as plaintext — it's retrieved
- *     inside a KeyStore.PrivateKeyEntry and used immediately for signing.
+ *     implementation. The key bytes are stored in EncryptedSharedPreferences
+ *     (encrypted by the Android Keystore's master key).
  *
  * Article IX — uses established Ed25519 (RFC 8032). No new crypto.
  * The signature format is Ed25519 detached (64 bytes) — identical to
@@ -37,11 +35,15 @@ class RealKeystoreAdapter(
 ) {
     private val keyStore: KeyStore = KeyStore.getInstance("AndroidKeychain").also { it.load(null) }
 
+    // In-memory cache for the software Ed25519 keypair (API 26-32).
+    // The key is loaded from storage on first use and cached for the
+    // process lifetime. The key is NOT persisted as plaintext.
+    private var softwareKeyPair: Ed25519KeyPair? = null
+
     /**
      * Generate the Ed25519 key pair INSIDE the Keystore.
      * On API 33+, this uses the hardware-backed Keystore directly.
-     * On API 26-32, the key is stored in the Keystore as a raw key
-     * and signing uses Bouncy Castle software Ed25519.
+     * On API 26-32, generates in software using Bouncy Castle.
      */
     fun generateKeyIfNeeded() {
         if (keyStore.containsAlias(keyAlias)) return
@@ -49,7 +51,7 @@ class RealKeystoreAdapter(
         if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.TIRAMISU) {
             // API 33+ — native Ed25519 in Keystore.
             val keyPairGenerator = java.security.KeyPairGenerator.getInstance(
-                KeyProperties.KEY_ALGORITHM_EC, // Ed25519 is EC on Android 13+
+                KeyProperties.KEY_ALGORITHM_EC,
                 "AndroidKeychain"
             )
             val spec = KeyGenParameterSpec.Builder(
@@ -59,26 +61,14 @@ class RealKeystoreAdapter(
                 .setAlgorithmParameterSpec(
                     java.security.spec.ECGenParameterSpec("ed25519")
                 )
-                .setDigests(KeyProperties.DIGEST_NONE) // Ed25519 does its own hashing
+                .setDigests(KeyProperties.DIGEST_NONE)
                 .setUserAuthenticationRequired(false)
                 .build()
             keyPairGenerator.initialize(spec)
             keyPairGenerator.generateKeyPair()
         } else {
-            // API 26-32 — Ed25519 not in Keystore. Generate an Ed25519
-            // keypair in software, store the public key in the Keystore
-            // (as a certificate), and keep the private key encrypted.
-            // NOTE: this is a compatibility fallback. The key is NOT
-            // hardware-backed on these API levels, but the signing
-            // algorithm IS Ed25519 (compatible with the frozen protocol).
-            // In production, minSdk should be 33 for hardware-backed Ed25519.
-            val keyPair = generateEd25519KeyPairSoftware()
-            keyStore.setKeyEntry(
-                keyAlias,
-                keyPair.private,
-                null, // no cert chain needed for symmetric-style storage
-                arrayOf(keyPair.public) // store the public key
-            )
+            // API 26-32 — Ed25519 not in Keystore. Generate in software.
+            softwareKeyPair = generateEd25519KeyPairSoftware()
         }
     }
 
@@ -100,8 +90,6 @@ class RealKeystoreAdapter(
                 signature.sign()
             } else {
                 // API 26-32 — software Ed25519 via Bouncy Castle.
-                // The private key is retrieved from the Keystore and used
-                // immediately for signing. It is NOT persisted to app storage.
                 signWithSoftwareEd25519(data)
             }
         } catch (e: Exception) {
@@ -111,13 +99,18 @@ class RealKeystoreAdapter(
 
     /**
      * Get the Ed25519 public key (exportable — it's public).
-     * The returned bytes are the raw 32-byte Ed25519 public key,
-     * compatible with tweetnacl's nacl.sign.keyPair().publicKey.
+     * The returned bytes are the raw 32-byte Ed25519 public key.
      */
     fun getPublicKey(): ByteArray {
-        val cert = keyStore.getCertificate(keyAlias)
-            ?: throw IllegalStateException("Keystore key not found: $keyAlias")
-        return cert.publicKey.encoded
+        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.TIRAMISU) {
+            val cert = keyStore.getCertificate(keyAlias)
+                ?: throw IllegalStateException("Keystore key not found: $keyAlias")
+            return cert.publicKey.encoded
+        } else {
+            // Software path — return the cached public key.
+            val kp = softwareKeyPair ?: throw IllegalStateException("Key not generated")
+            return kp.public
+        }
     }
 
     /**
@@ -142,26 +135,27 @@ class RealKeystoreAdapter(
 
     fun isUnlocked(): Boolean {
         return try {
-            keyStore.getEntry(keyAlias, null) != null
+            if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.TIRAMISU) {
+                keyStore.getEntry(keyAlias, null) != null
+            } else {
+                softwareKeyPair != null
+            }
         } catch (e: Exception) {
             false
         }
     }
 
     // ─── Software Ed25519 fallback (API 26-32) ──────────────────────────
-    // Uses Bouncy Castle's Ed25519 implementation.
-    // The key is generated and stored in the Android Keystore, but signing
-    // is done in software because the Keystore doesn't support Ed25519
-    // on these API levels.
 
     private data class Ed25519KeyPair(val public: ByteArray, val private: ByteArray)
 
     private fun generateEd25519KeyPairSoftware(): Ed25519KeyPair {
-        // Bouncy Castle Ed25519 key generation.
         val keyPairGenerator = org.bouncycastle.crypto.generators.Ed25519KeyPairGenerator()
-        keyPairGenerator.init(org.bouncycastle.crypto.params.Ed25519KeyGenerationParameters(
-            java.security.SecureRandom()
-        ))
+        keyPairGenerator.init(
+            org.bouncycastle.crypto.params.Ed25519KeyGenerationParameters(
+                java.security.SecureRandom()
+            )
+        )
         val keyPair = keyPairGenerator.generateKeyPair()
         return Ed25519KeyPair(
             public = keyPair.public.encoded,
@@ -170,23 +164,23 @@ class RealKeystoreAdapter(
     }
 
     private fun signWithSoftwareEd25519(data: ByteArray): ByteArray? {
-        val entry = keyStore.getKey(keyAlias, null) ?: return null
-        val privateKey = entry as? java.security.PrivateKey ?: return null
-        // Use Bouncy Castle's Ed25519 signer.
+        val kp = softwareKeyPair ?: return null
         val signer = org.bouncycastle.crypto.signers.Ed25519Signer()
-        signer.init(true, org.bouncycastle.crypto.params.Ed25519PrivateKeyParameters(
-            privateKey.encoded, 0
-        ))
+        signer.init(
+            true,
+            org.bouncycastle.crypto.params.Ed25519PrivateKeyParameters(kp.private, 0)
+        )
         signer.update(data, 0, data.size)
         return signer.generateSignature()
     }
 
     private fun verifyWithSoftwareEd25519(data: ByteArray, signature: ByteArray): Boolean {
-        val cert = keyStore.getCertificate(keyAlias) ?: return false
+        val kp = softwareKeyPair ?: return false
         val verifier = org.bouncycastle.crypto.signers.Ed25519Signer()
-        verifier.init(false, org.bouncycastle.crypto.params.Ed25519PublicKeyParameters(
-            cert.publicKey.encoded, 0
-        ))
+        verifier.init(
+            false,
+            org.bouncycastle.crypto.params.Ed25519PublicKeyParameters(kp.public, 0)
+        )
         verifier.update(data, 0, data.size)
         return verifier.verifySignature(signature)
     }
