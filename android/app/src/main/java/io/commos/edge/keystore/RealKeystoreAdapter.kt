@@ -157,9 +157,11 @@ class RealKeystoreAdapter(
             )
         )
         val keyPair = keyPairGenerator.generateKeyPair()
+        val publicParams = keyPair.public as org.bouncycastle.crypto.params.Ed25519PublicKeyParameters
+        val privateParams = keyPair.private as org.bouncycastle.crypto.params.Ed25519PrivateKeyParameters
         return Ed25519KeyPair(
-            public = keyPair.public.encoded,
-            private = keyPair.private.encoded
+            public = publicParams.encoded,
+            private = privateParams.encoded
         )
     }
 
