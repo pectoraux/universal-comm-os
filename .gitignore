@@ -68,3 +68,7 @@ server.log
 # with 30-day retention).
 /docs/verification/latest-execution.json
 /docs/verification/history/*.json
+android/.gradle/
+android/build/
+android/app/build/
+android/local.properties

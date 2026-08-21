@@ -557,3 +557,43 @@ Stage Summary:
 - P4.2 (BLE adapter): BLOCKED until P4.1-B is delivered.
 - ARCH-057 added to the ledger documenting the P4.1-A / P4.1-B split.
 - No implementation code changed in this correction — only documentation (ledger entries + worklog).
+
+---
+Task ID: P4.1-B (attempt)
+Agent: main (super-z)
+Task: Implement the real Android runtime foundation (P4.1-B). This requires actual Kotlin/Android implementations compiled and tested on an Android emulator or device. The environment has Java 21 but no pre-existing Android tooling.
+
+Work Log:
+- Installed Gradle 8.7 to ~/gradle-8.7 (128MB download — successful).
+- Installed Android SDK cmdline-tools + platform-34 + build-tools-34.0.0 to ~/android-sdk (147MB download — successful, licenses accepted).
+- Created the Android project structure under android/:
+  - android/settings.gradle.kts — plugin management, repositories.
+  - android/build.gradle.kts — AGP 8.2.2, Kotlin 1.9.22, KSP.
+  - android/app/build.gradle.kts — minSdk 26, targetSdk 34, compileSdk 34, dependencies (AndroidX core, Room 2.6.1, coroutines, kotlinx-serialization, Robolectric 4.11.1, AndroidX test).
+  - android/app/src/main/AndroidManifest.xml — foreground service (FOREGROUND_SERVICE_CONNECTED_DEVICE), POST_NOTIFICATIONS, allowBackup=false (security — local DB excluded from backup). NO BLE/Wi-Fi/location permissions (those are P4.2/P4.3).
+- Wrote real Kotlin implementations:
+  - CommOsService.kt — real Android foreground Service, lifecycle ownership (CREATED→INITIALIZING→HYDRATING→RUNNING→DRAINING→STOPPED), notification channel, TTL sweeper coroutine (60s), resource sampler coroutine (30s), all owned by serviceScope (R5 callback ownership). Uses kotlinx.coroutines (R6 concurrency).
+  - RoomBundleStore.kt — real Room/SQLite persistence with WAL (P6 crash consistency), @Entity StoredBundleEntity + ReceivedBundleEntity, @Dao interfaces (insert/IGNORE for P1 dedup, updateState for P4, updateBundleJson for P5), @Database with WAL journal mode, fallbackToDestructiveMigration (P7 forward-only). RoomBundleStore class exposes push/markReceived/getExpiredBundleIds/updateStateFromTracker/appendForwardingProof/snapshot.
+  - RealKeystoreAdapter.kt — real Android Keystore integration using KeyStore.getInstance("AndroidKeychain"), EC P-256 (Ed25519 not available on API 26-32; available on 33+ — the impl uses EC for broader compatibility), KeyGenParameterSpec with PURPOSE_SIGN|PURPOSE_VERIFY, SHA256withECDSA. Private key never leaves the Keystore (sign() happens inside). getPublicKey() returns the cert's public key bytes. No getPrivateKey() method exists.
+  - AndroidResourceSampler.kt — real BatteryManager + StorageStatsManager (StatFs). Returns ResourceReport(batteryPct, storageFreeBytes, isCharging, sampledAt). Observation only — NOT protocol state.
+  - CommOsRuntimeBridge.kt — real protocol bridge. Opens Room DB, creates RoomBundleStore + RealKeystoreAdapter + AndroidResourceSampler. hydrate() reads from Room DB (R1/R3). runTtlSweeper() calls updateStateFromTracker (R7). sampleResources() reads platform APIs (Article XVIII §7). signPayload() delegates to Keystore (R4 fail-closed). registerTransport/unregisterTransport (P4 design §12). close() releases all (R5).
+- Wrote JVM unit tests (Robolectric):
+  - CommOsServiceTest.kt — lifecycle starts in CREATED.
+  - RoomBundleStoreTest.kt — P1 (push idempotent), P2 (dedup by bundle_id), P4 (state via tracker), R1 (persistence survives DB reopen via snapshot).
+- Wrote instrumentation tests:
+  - InstrumentationTests.kt — KeystoreInstrumentationTest (key generation, public key retrieval, signing, verification, private key non-exportable, restart no-regenerate, no secrets in logs). RoomBundleStoreInstrumentationTest (P6 crash consistency — close DB + reopen + verify state survived, R1/R3 deterministic rehydration).
+- ATTEMPTED BUILD: ./gradlew assembleDebug — FAILED (context deadline exceeded). The first-time Gradle dependency download (AGP + Kotlin compiler + AndroidX + Room + Robolectric) is ~500MB+ and exceeds the sandbox's time/bandwidth limits.
+
+ENVIRONMENT LIMITATION (honest disclosure):
+- This sandbox has Java 21 and the Android SDK is installed, but Gradle's first-time dependency download times out.
+- The Kotlin source files are REAL implementations using REAL Android APIs (AndroidKeychain, Room/SQLite, BatteryManager, foreground Service, NotificationChannel). They are NOT abstractions or test fixtures.
+- However, the code is UNCOMPILED and UNTESTED in this environment.
+- The instrumentation tests CANNOT run (no emulator/device).
+- The JVM unit tests (Robolectric) CANNOT run (Gradle can't download dependencies in time).
+- Per the P4.1-B prompt §18: "A milestone claiming P4.1-B completion without instrumentation/device evidence is invalid."
+
+STATUS:
+- P4.1-B: NOT COMPLETE. Real Kotlin source exists but is uncompiled/untested.
+- P4.2 (BLE): STILL BLOCKED.
+- The TypeScript test suite (513 tests) still passes — the P4.1-A contract layer is unaffected.
+- ARCH-056 remains INTERFACE-DEFINED (the Kotlin source exists but is not validated by tests).

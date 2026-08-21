@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <!-- P4.1-B: Foreground service permission (required for long-lived runtime). -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <!-- Android 14+ requires the connected-device subtype for BLE/Wi-Fi services. -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CONNECTED_DEVICE" />
+    <!-- Required for the foreground service notification on Android 13+. -->
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+
+    <!--
+      P4.1-B does NOT request BLE, Wi-Fi, or location permissions.
+      Those belong to P4.2 (BLE) and P4.3 (Wi-Fi Direct).
+      No speculative permissions.
+    -->
+
+    <application
+        android:allowBackup="false"
+        android:label="CommOS"
+        android:supportsRtl="true">
+
+        <!--
+          allowBackup="false" — the local SQLite database contains bundle
+          ciphertext + routing metadata. Per the security review (P4.1-B §17),
+          local database files MUST be excluded from Android backup to prevent
+          accidental exposure of protocol metadata via adb backup.
+        -->
+
+        <service
+            android:name=".CommOsService"
+            android:exported="false"
+            android:foregroundServiceType="connectedDevice">
+            <!-- connectedDevice is the correct foreground-service type for
+                 a service that manages device connections (BLE/Wi-Fi Direct
+                 in P4.2/P4.3). P4.1-B uses it for the runtime host only. -->
+        </service>
+    </application>
+</manifest>
