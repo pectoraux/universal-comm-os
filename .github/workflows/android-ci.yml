@@ -17,21 +17,12 @@ jobs:
           distribution: temurin
           java-version: '17'
 
-      - name: Set up Android SDK
-        uses: android-actions/setup-android@v3
-        with:
-          packages: |
-            platforms;android-34
-            build-tools;34.0.0
-
-      - name: Cache Gradle
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.gradle/caches
-            ~/.gradle/wrapper
-          key: gradle-${{ runner.os }}-${{ hashFiles('android/**/*.gradle.kts') }}
-          restore-keys: gradle-${{ runner.os }}-
+      - name: Verify Android SDK
+        run: |
+          echo "ANDROID_HOME=$ANDROID_HOME"
+          ls "$ANDROID_HOME/platforms/" 2>/dev/null || echo "No platforms"
+          ls "$ANDROID_HOME/build-tools/" 2>/dev/null || echo "No build-tools"
+          sdkmanager --list_installed 2>/dev/null | head -20 || echo "sdkmanager not available"
 
       - name: Create Gradle wrapper
         working-directory: android
@@ -60,23 +51,6 @@ jobs:
         with:
           distribution: temurin
           java-version: '17'
-
-      - name: Set up Android SDK
-        uses: android-actions/setup-android@v3
-        with:
-          packages: |
-            platforms;android-34
-            build-tools;34.0.0
-            system-images;android-34;google_apis;x86_64
-
-      - name: Cache Gradle
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.gradle/caches
-            ~/.gradle/wrapper
-          key: gradle-${{ runner.os }}-${{ hashFiles('android/**/*.gradle.kts') }}
-          restore-keys: gradle-${{ runner.os }}-
 
       - name: Create Gradle wrapper
         working-directory: android
