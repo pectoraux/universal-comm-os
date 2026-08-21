@@ -188,3 +188,103 @@ Stage Summary:
 - The gate script runs cleanly in BOTH modes at this commit. MAIN_MILESTONE requires local HEAD == origin/main HEAD == tested SHA. PR_INTEGRITY requires tested SHA == checked-out HEAD only.
 - Branch protection: NOT enabled (GitHub API returns 403 on the private repo without GitHub Pro). Compensated by the pre-push hook + CI gating per Article XVI §"Branch protection / required status checks".
 - S0.2.4 is COMPLETE per Article XVI. P4 / P7 may proceed.
+
+---
+Task ID: S0.2.5
+Agent: main (super-z)
+Task: Execution Integrity Evidence — final governance milestone before P4. Add Article XVII (Execution Evidence Integrity), ARCH-052 (Execution Evidence Manifest), the generator and verifier scripts, integrate with the Repository Truth Gate, add the CI execution-evidence job, and produce the Article XVII COMMIT REPORT. Governance-only — no changes to IdentityLink state machine, Authorization model, Visibility model, Encryption model, or Routing architecture.
+
+Work Log:
+- Read the S0.2.4 final state: HEAD = 6a647b4, worktree clean, 344 tests pass, tsc exit 0. Baseline established.
+- Wrote Article XVII (Execution Evidence Integrity) in `docs/architecture/ARCHITECTURE_CONSTITUTION.md`. The article codifies:
+  - Required principle: a milestone completion claim requires not only repository truth (Article XVI) but execution evidence — manifest must record commit_sha, environment, commands, exit_codes, and correspondence to repository state.
+  - Manifest format (ARCH-052): milestone / commit_sha / repository / branch / timestamp / environment{os,node,package_manager,runtime} / commands[{label,command,exit_code,duration_ms,summary}] / results{tests,architecture,security,typecheck}.
+  - Generation rules: refuse on dirty worktree, RE-EXECUTE the validation commands (do not trust prior gate run), write to docs/verification/latest-execution.json, archive to docs/verification/history/<milestone>-<short-sha>-<timestamp>.json, refuse to generate if HEAD moves during execution.
+  - Verification rules: manifest exists, parses as JSON, all required fields non-empty, commit_sha == git rev-parse HEAD, repository matches origin URL (credentials stripped), every commands[].exit_code is 0, timestamp parses as ISO-8601 and is within 30 days, typecheck == "PASS", results.tests/architecture/security each contain "<N> passed" with non-zero count and either explicit "0 failed" OR matching pass/total counts (vitest output: "Tests <N> passed (<N>)" means 0 failures).
+  - Invalidation conditions: 7 conditions enumerated (HEAD advanced, remote changed, > 30 days stale, non-zero exit_code, missing field, JSON parse failure, milestone ID mismatch).
+  - CI enforcement: new `execution-evidence` job that depends on existing gates (does NOT weaken them), generates manifest, verifies manifest, uploads as Actions artifact with 30-day retention.
+  - Commit report extension: Article XVI COMMIT REPORT extended with EXECUTION EVIDENCE block (PATH / SHA / STATUS). A milestone reported COMPLETE without STATUS: VALID is automatically INVALID per Article XVII.
+  - History: documents the S0.2.5 motivation — closing the last gap left by Article XVI (which proved the tested code is identical to the repository code, but did not prove the test was actually executed).
+- Wrote ARCH-052 in `docs/architecture/ARCHITECTURE_LEDGER.md` describing the manifest format, generator/verifier scripts, CI execution-evidence job, the 30-day artifact retention, and the COMMIT REPORT extension.
+- Created `docs/verification/` directory structure:
+  - `docs/verification/README.md` — tracks the directory in git, documents the manifest format, explains why the manifest is gitignored (committing it would advance HEAD and invalidate the strict-equality check manifest.commit_sha == HEAD), and documents the generate + verify commands.
+  - `docs/verification/history/README.md` — tracks the history directory, documents that archived manifests are kept for forensic audit (not used by the verifier — only latest-execution.json is).
+- Wrote `scripts/generate-execution-evidence.sh` — a verifiable bash script that:
+  - Refuses to run if worktree is dirty (manifest's commit_sha must correspond to a real commit).
+  - Captures commit_sha (git rev-parse HEAD), branch, repository (URL with credentials stripped via sed), ISO-8601 timestamp (date -u +"%Y-%m-%dT%H:%M:%S+00:00"), environment (OS via uname, Node via node --version, package_manager via bun/npm --version, runtime via npx vitest --version).
+  - Re-executes 4 required validation commands: typecheck (npx tsc --noEmit), tests (bun run vitest --run), architecture (bun run vitest --run tests/architecture/), security (bun run vitest --run tests/architecture/s0-security.test.ts). Each command's exit_code and duration_ms are recorded; commands run with `|| true` so failures don't kill the script (the manifest captures the failure).
+  - Builds the JSON manifest using python3 (which is more reliable than jq for nested objects with embedded quotes).
+  - Archives a copy to docs/verification/history/<milestone>-<short-sha>-<timestamp>.json.
+  - Computes overall_status: VALID iff every command exit_code is 0 AND HEAD didn't move during generation.
+  - Emits a clear summary showing milestone, SHA, branch, repository, timestamp, environment, per-command results, overall status, and the manifest paths.
+- Wrote `scripts/verify-execution-evidence.sh` — a verifiable bash script that checks:
+  - Manifest exists at docs/verification/latest-execution.json.
+  - Manifest parses as JSON.
+  - All required top-level fields present and non-empty (milestone, commit_sha, repository, branch, timestamp).
+  - All environment.* fields present and non-empty (os, node, package_manager, runtime).
+  - All results.* fields present and non-empty (tests, architecture, security, typecheck).
+  - commands[] is a non-empty list.
+  - commit_sha == git rev-parse HEAD.
+  - repository matches git remote get-url origin (credentials stripped).
+  - Every commands[].exit_code is 0.
+  - timestamp parses as ISO-8601 and is within 30 days.
+  - results.typecheck == "PASS".
+  - results.{tests,architecture,security} contain "<N> passed" with non-zero count, AND either explicit "0 failed" OR matching "passed (<N>)" pattern (vitest's success-only output).
+  - Emits STATUS: VALID or specific FAIL message with exit code.
+- Updated `scripts/repo-truth-gate.sh` to:
+  - Invoke scripts/generate-execution-evidence.sh after the existing checks.
+  - Invoke scripts/verify-execution-evidence.sh to verify the generated manifest.
+  - Emit the EXECUTION EVIDENCE block (PATH / SHA / STATUS) in the COMMIT REPORT.
+  - Exit 1 if execution evidence is not VALID (Article XVII requirement).
+  - Extend the reviewer-verification hints with `cat docs/verification/latest-execution.json` and `bash scripts/verify-execution-evidence.sh`.
+- Updated `.github/workflows/ci.yml` with the `execution-evidence` job:
+  - Depends on `ci`, `repo-truth-gate-pr`, and `repo-truth-gate-main` (does NOT weaken them — the job runs AFTER them as a new required check).
+  - Checks out the repo (fetch-depth: 0).
+  - Installs bun + dependencies, generates Prisma Client.
+  - Runs scripts/generate-execution-evidence.sh to produce the manifest.
+  - Runs scripts/verify-execution-evidence.sh to verify the manifest.
+  - Uploads docs/verification/ as a GitHub Actions artifact named `execution-evidence-<github.sha>` with `retention-days: 30`.
+  - Emits a step summary documenting Article XVII / ARCH-052.
+- Updated `.gitignore` to gitignore `/docs/verification/latest-execution.json` and `/docs/verification/history/*.json`. The manifest is a GENERATED artifact, not a tracked source file — committing it would advance HEAD, invalidating the strict-equality check (manifest.commit_sha == HEAD). The `docs/verification/` directory itself is tracked via the README.md files. In CI, the manifest is uploaded as an Actions artifact with 30-day retention.
+- Wrote `tests/architecture/s025-execution-integrity.test.ts` — 92 acceptance tests across 10 suites:
+  - S0.2.5-A (11 tests): Constitution Article XVII exists with the canonical manifest format spec, generation rules, verification rules, invalidation conditions, CI enforcement, COMMIT REPORT extension, and S0.2.5 motivation.
+  - S0.2.5-B (9 tests): Ledger ARCH-052 entry exists with reference to Article XVII, manifest path, generator/verifier script paths, RE-EXECUTES requirement, CI job name + 30-day retention, COMMIT REPORT extension, completion-without-VALID-evidence-is-INVALID rule.
+  - S0.2.5-C (10 tests): Manifest format — all required fields documented in the constitution.
+  - S0.2.5-D (15 tests): Generator script exists, is executable, has set -euo pipefail, takes MILESTONE arg, refuses on dirty worktree, captures commit_sha/branch/repository/timestamp/environment, re-executes the 4 validation commands, writes the manifest, archives a copy, computes overall_status, verifies HEAD didn't move, emits clear STATUS line.
+  - S0.2.5-E (12 tests): Verifier script exists, is executable, has set -euo pipefail, checks manifest existence, validates JSON, verifies commit_sha==HEAD, verifies repository match, verifies every exit_code is 0, verifies timestamp is ISO-8601 + within 30 days, verifies typecheck==PASS, verifies results contain "passed" with non-zero count, exits 0 on VALID / 1 on INVALID with specific error.
+  - S0.2.5-F (6 tests): Repo Truth Gate integrates evidence — invokes generator + verifier, emits EXECUTION EVIDENCE block, references Article XVII / ARCH-052, exits 1 if not VALID, extends reviewer-verification hints.
+  - S0.2.5-G (10 tests): CI workflow has execution-evidence job with `needs: [ci, repo-truth-gate-pr, repo-truth-gate-main]`, checkout, bun setup, prisma generate, generate-evidence step, verify-evidence step, artifact upload with 30-day retention, step summary, does NOT remove existing gate jobs.
+  - S0.2.5-H (4 tests): .gitignore entries for the manifest paths + documentation of why the manifest is gitignored.
+  - S0.2.5-I (7 tests): docs/verification/ directory structure (README files exist, documented).
+  - S0.2.5-J (8 tests): Verifier handles all invalidation conditions (missing manifest, SHA mismatch, repository mismatch, non-zero exit codes, stale timestamp, typecheck != PASS, missing "passed" with non-zero count, non-zero failures).
+- Iteratively fixed generator bugs discovered when the pre-push hook ran the gate at the amended commit:
+  - Fix 1: Python f-string with `\"` escapes inside a bash single-quoted heredoc was invalid Python syntax. Rewrote the per-command summary loop to use string concatenation instead of f-strings.
+  - Fix 2: Typecheck command (npx tsc --noEmit) produces no output on success — the extract_summary fallback returned "FAIL (empty log)". Updated extract_summary to recognize that for typecheck specifically, an empty log on a successful exit is PASS (not FAIL).
+  - Fix 3: Verifier required explicit "0 failed" in the test summary. Vitest output on success is "Tests <N> passed (<N>)" — no "failed" line is shown because there are zero failures. Updated the verifier to accept BOTH explicit "0 failed" AND implicit zero failures (matching "passed (<N>)" pattern where the two N values are equal).
+- Final reconciliation:
+  - LOCAL HEAD == GITHUB main HEAD == TESTED SHA = 5176da5f79ad9341894902f25285ce8fd9240d06. MATCH: YES.
+  - WORKTREE CLEAN: YES.
+  - Test result: 436 passed / 0 failed (was 344; +92 new S0.2.5).
+  - Architecture subset: 383 passed / 0 failed (FATAL).
+  - Security subset: 11 passed / 0 failed (FATAL).
+  - Typecheck: PASS (FATAL).
+  - Execution evidence: docs/verification/latest-execution.json, SHA 5176da5f79ad9341894902f25285ce8fd9240d06, STATUS: VALID.
+- The pre-push hook (installed via scripts/install-pre-push-hook.sh during S0.2.4) ran the gate in PR_INTEGRITY mode during the push, which generated + verified the execution evidence manifest. The push was accepted because evidence STATUS was VALID.
+
+Stage Summary:
+- Artifact: `docs/architecture/ARCHITECTURE_CONSTITUTION.md` — Article XVII added with full manifest format spec.
+- Artifact: `docs/architecture/ARCHITECTURE_LEDGER.md` — ARCH-052 added.
+- Artifact: `scripts/generate-execution-evidence.sh` — verifiable generator (captures SHA/branch/repo/timestamp/env, re-executes commands, records exit_codes + durations, writes manifest + archive copy).
+- Artifact: `scripts/verify-execution-evidence.sh` — verifiable verifier (manifest exists, JSON parses, all fields present, SHA == HEAD, repo matches, all exit_codes 0, timestamp within 30 days, typecheck PASS, results contain "<N> passed" + non-zero count + zero failures).
+- Artifact: `scripts/repo-truth-gate.sh` — extended to invoke generator + verifier and emit EXECUTION EVIDENCE block in COMMIT REPORT. Exits 1 if evidence not VALID.
+- Artifact: `.github/workflows/ci.yml` — execution-evidence job (depends on ci + repo-truth-gate-* jobs; generates + verifies + uploads manifest as artifact with 30-day retention).
+- Artifact: `.gitignore` — manifest paths gitignored (committing the manifest would advance HEAD and invalidate the strict-equality check).
+- Artifact: `docs/verification/README.md` + `docs/verification/history/README.md` — track the directory structure in git, document the manifest format + gitignore rationale.
+- Artifact: `tests/architecture/s025-execution-integrity.test.ts` — 92 acceptance tests across 10 suites.
+- Test results: 436 passed (92 new S0.2.5 + 344 prior) across 18 test files. 0 failures.
+- Architecture subset: 383 passed (FATAL).
+- Security subset: 11 passed (FATAL).
+- Typecheck: PASS (FATAL).
+- Execution evidence manifest: VALID (commit_sha == HEAD == origin/main HEAD == 5176da5).
+- S0.2.5 is COMPLETE per Article XVII. The execution evidence layer closes the last gap in the governance chain — Article XVI proved the tested code is identical to the repository code, but did not prove the test was actually executed. S0.2.5 adds the execution evidence layer that proves it.
+- P4 (Edge Transport Foundation — Android BLE / Wi-Fi Direct / local peer discovery / encrypted transport sessions / offline message exchange / relay participation) MAY NOW PROCEED, consuming the existing frozen protocol contracts (Bundle format, Identity verification, Authorization semantics, Trust model, Delivery state machine) without modification.
