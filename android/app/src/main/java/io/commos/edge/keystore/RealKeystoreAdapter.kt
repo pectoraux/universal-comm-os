@@ -130,17 +130,34 @@ class RealKeystoreAdapter(
     /**
      * Verify an Ed25519 signature against the public key.
      * Compatible with tweetnacl's nacl.sign.detached.verify().
+     *
+     * On API 33+, verification uses Bouncy Castle's Ed25519Signer with the
+     * raw 32-byte public key extracted from the X.509 SubjectPublicKeyInfo
+     * returned by keyStore.getCertificate(alias).publicKey.encoded.
+     *
+     * This does NOT compromise the AndroidKeyStore private key boundary —
+     * verification uses only the PUBLIC key (exportable per ARCH-056).
+     * AndroidKeyStore remains the sole owner of the signing private key on
+     * API 33+ (see sign()).
+     *
+     * Root cause (Run #19): Signature.getInstance("Ed25519").initVerify
+     * (cert.publicKey) throws InvalidKeyException on the API 34 emulator
+     * for keys generated via KeyPairGenerator("EC", "AndroidKeyStore") +
+     * ECGenParameterSpec("ed25519"). The exception is caught → verify()
+     * returns false even when the signature is valid. Bouncy Castle's
+     * Ed25519Signer accepts the raw 32-byte public key directly and
+     * verifies the standard Ed25519 signature produced by sign().
      */
     fun verify(data: ByteArray, signature: ByteArray): Boolean {
         return try {
             if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.TIRAMISU) {
                 val cert = keyStore.getCertificate(keyAlias) ?: return false
-                val sig = Signature.getInstance("Ed25519")
-                sig.initVerify(cert.publicKey)
-                sig.update(data)
-                sig.verify(signature)
+                val rawPubKey = extractRawEd25519PublicKey(cert.publicKey.encoded)
+                    ?: return false
+                verifyWithSoftwareEd25519(data, signature, rawPubKey)
             } else {
-                verifyWithSoftwareEd25519(data, signature)
+                val kp = softwareKeyPair ?: return false
+                verifyWithSoftwareEd25519(data, signature, kp.public)
             }
         } catch (e: Exception) {
             false
@@ -190,14 +207,35 @@ class RealKeystoreAdapter(
         return signer.generateSignature()
     }
 
-    private fun verifyWithSoftwareEd25519(data: ByteArray, signature: ByteArray): Boolean {
-        val kp = softwareKeyPair ?: return false
+    private fun verifyWithSoftwareEd25519(
+        data: ByteArray,
+        signature: ByteArray,
+        publicKey: ByteArray
+    ): Boolean {
         val verifier = org.bouncycastle.crypto.signers.Ed25519Signer()
         verifier.init(
             false,
-            org.bouncycastle.crypto.params.Ed25519PublicKeyParameters(kp.public, 0)
+            org.bouncycastle.crypto.params.Ed25519PublicKeyParameters(publicKey, 0)
         )
         verifier.update(data, 0, data.size)
         return verifier.verifySignature(signature)
+    }
+
+    /**
+     * Extract the raw 32-byte Ed25519 public key from an X.509
+     * SubjectPublicKeyInfo encoding (the format returned by
+     * PublicKey.encoded for an Android Keystore Ed25519 cert).
+     *
+     * Returns null if the encoding is not a recognizable Ed25519
+     * SubjectPublicKeyInfo. This is a parse-only operation — no key
+     * material is generated or modified.
+     */
+    private fun extractRawEd25519PublicKey(x509Encoded: ByteArray): ByteArray? {
+        return try {
+            val spInfo = org.bouncycastle.asn1.x509.SubjectPublicKeyInfo.getInstance(x509Encoded)
+            spInfo.publicKeyData.bytes
+        } catch (e: Exception) {
+            null
+        }
     }
 }
