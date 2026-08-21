@@ -672,3 +672,41 @@ Stage Summary:
 - The web preview is available at the platform's preview URL.
 - P4.1-B-H status is unchanged: SOURCE IMPLEMENTED / VALIDATION IN PROGRESS. The Android hardening work (H1-H7) is committed alongside this revert. H8 (compile) and H9 (instrumentation) remain pending.
 - P4.2 BLE: STILL BLOCKED.
+
+---
+Task ID: S0.2.6-B
+Agent: main (super-z)
+Task: PostgreSQL environment/test cleanup + GitHub branch protection. Fix the broken PostgreSQL architecture test (removed .env dependency), create .env.example (tracked, no secrets), enable native GitHub branch protection (repo is now public), and update governance documentation.
+
+Work Log:
+- Verified baseline: HEAD = origin/main = 0c6a33a (S0.2.6-A). Worktree clean.
+- FIXED the broken PostgreSQL architecture test: removed the 4th test that read .env (gitignored — broke on fresh clone/CI). Replaced with 9 tests that ONLY depend on tracked files:
+  1. datasource provider is postgresql (prisma/schema.prisma).
+  2. schema does not mention "SQLite for local dev".
+  3. schema comment references PostgreSQL.
+  4. canonical schema does not use file: datasource.
+  5-7. .env.example exists, uses postgresql://, does not contain real secrets.
+  8. .env.example uses placeholder credentials.
+  9. .env is NOT tracked (git ls-files .env returns empty).
+- Created .env.example (tracked, no secrets): DATABASE_URL=postgresql://USER:PASSWORD@HOST:5432/commos_dev, NEXTAUTH_URL=http://localhost:3000, NEXTAUTH_SECRET= (empty placeholder).
+- Verified .env is NOT tracked: `git ls-files .env` returns empty.
+- Verified .env.example is tracked: `git ls-files .env.example` returns the path.
+- ENABLED GitHub branch protection on main:
+  - PUT /repos/pectoraux/universal-comm-os/branches/main/protection — HTTP 200 (success).
+  - Required status checks: ["ci", "repo-truth-gate-pr", "execution-evidence"].
+  - enforce_admins: true (rules apply to all users including admins).
+  - Required pull request reviews: 1 approving review (dismiss stale reviews).
+  - strict: true (branches must be up-to-date with main before merge).
+  - The repo is now PUBLIC (visibility: "public", private: false).
+- Updated docs/architecture/ARCHITECTURE_CONSTITUTION.md Article XVI §"Branch protection" section: replaced the old private-repo limitation text with the new branch-protection-enabled state. Documented the required status checks, enforce_admins, PR reviews, and strict mode.
+- Updated the S0.2.4 history section to note the limitation was resolved in S0.2.6-B.
+- Verified the full test suite: 522 tests pass (9 new PostgreSQL tests + 513 prior), tsc clean.
+- Android changes verified NOT drifted: the P4.1-B-H Kotlin source (CommOsService, RoomBundleStore, RealKeystoreAdapter, CommOsRuntimeBridge, KotlinDeliveryTracker, AndroidResourceSampler) is unchanged from commit 857f82f. The Ed25519 fix, delivery state authority fix, non-destructive migrations fix, canonical lifecycle fix, and complete runtime bridge are all intact.
+
+Stage Summary:
+- The PostgreSQL regression is fully fixed: schema is postgresql, architecture test passes from a fresh clone (no .env dependency), .env.example is tracked with placeholder values.
+- GitHub branch protection is ENABLED on main: required status checks (ci, repo-truth-gate-pr, execution-evidence), enforce_admins, required PR reviews, strict mode.
+- The repository is PUBLIC.
+- Test results: 522 passed (9 new S0.2.6-B tests + 513 prior). tsc clean.
+- P4.1-B-H status: SOURCE IMPLEMENTED / VALIDATION IN PROGRESS (unchanged — no Android changes in this milestone).
+- P4.2 BLE: STILL BLOCKED.

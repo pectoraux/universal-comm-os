@@ -250,21 +250,18 @@ A workflow on `push: branches: [main]` runs the gate in MAIN_MILESTONE mode. A w
 
 ### Branch protection / required status checks (S0.2.4 §9)
 
-GitHub branch protection rules and repository rulesets are NOT available on private repositories without GitHub Pro / Team / Enterprise. The `pectoraux/universal-comm-os` repository is currently private — the GitHub API returns `403` on `PUT /repos/{owner}/{repo}/branches/main/protection` and on `POST /repos/{owner}/{repo}/rulesets`.
+GitHub branch protection rules are now ENABLED on the `pectoraux/universal-comm-os` repository (S0.2.6-B). The repository was made public, which enables free branch protection. The protection rules require:
+  - Required status checks: `ci`, `repo-truth-gate-pr`, `execution-evidence` (must pass before merge).
+  - `enforce_admins: true` (rules apply to all users including admins).
+  - Required pull request reviews (1 approving review required before merge).
+  - `strict: true` (branches must be up-to-date with main before merge).
 
-Until either:
-- (a) the repository is made public (branch protection is free for public repos), OR
-- (b) the repository is upgraded to GitHub Pro / Team / Enterprise,
+The previous limitation (private repo → 403 on branch protection API) is no longer applicable. The pre-push hook (`scripts/install-pre-push-hook.sh`) and CI gating remain as compensating controls but are no longer the only enforcement layer — GitHub's native branch protection now provides the authoritative enforcement.
 
-the branch protection layer CANNOT be machine-enforced via GitHub's native API. Two compensating controls are in place:
+Previously (S0.2.3–S0.2.5), the repository was private and the GitHub API returned `403` on branch protection. That limitation was resolved in S0.2.6-B when the repository was made public and branch protection was enabled via `PUT /repos/pectoraux/universal-comm-os/branches/main/protection`.
 
-1. **Self-enforcement via the gate script** — every push to `main` triggers the MAIN_MILESTONE gate job in CI, which fails the build if `local HEAD != origin/main HEAD`. A failed build is a clear signal to the reviewer that the gate was not satisfied. The agent MUST NOT report "complete" without an Article XVI COMMIT REPORT whose SHAs match.
-
-2. **Pre-push hook** (`scripts/install-pre-push-hook.sh`, installed locally on every developer machine) runs the PR_INTEGRITY gate before allowing a push. The hook can be bypassed with `git push --no-verify`, but doing so is recorded as an Article XVI violation.
-
-The reviewer MAY at any time:
-- `curl -sS https://api.github.com/repos/pectoraux/universal-comm-os/branches/main/protection` to verify whether branch protection is enabled. If the response is `404`, protection is OFF (the repo is still private without Pro). If `200`, protection is ON.
-- Recommend making the repository public (which enables free branch protection) before the next hardening sprint.
+The reviewer MAY verify:
+- `curl -sS https://api.github.com/repos/pectoraux/universal-comm-os/branches/main/protection` to confirm protection is enabled (returns `200` with the protection rules JSON).
 
 ### Mandatory rule
 
