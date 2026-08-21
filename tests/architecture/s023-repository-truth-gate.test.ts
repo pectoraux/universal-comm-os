@@ -388,7 +388,9 @@ describe('S0.2.4-E: CI workflow — two gate jobs, no continue-on-error', () => 
     // (matching `^      continue-on-error:`), but a comment in the `name:`
     // value does NOT start at column 6.
     const lines = ci.split('\n');
-    const startIdx = lines.findIndex((l) => l.trim().startsWith('- name: Typecheck'));
+    // S0.2.6-B: the name is now quoted ("Typecheck (FATAL...)") to fix
+    // a YAML parsing error. The search must handle both quoted and unquoted.
+    const startIdx = lines.findIndex((l) => l.trim().startsWith('- name:') && l.includes('Typecheck'));
     expect(startIdx).toBeGreaterThanOrEqual(0);
     // Read forward until we hit the next `- name:` step or end of file.
     let i = startIdx + 1;
