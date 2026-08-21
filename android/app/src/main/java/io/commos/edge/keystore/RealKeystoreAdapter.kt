@@ -82,10 +82,24 @@ class RealKeystoreAdapter(
         return try {
             if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.TIRAMISU) {
                 // API 33+ — sign inside the Keystore (hardware-backed).
-                val entry = keyStore.getEntry(keyAlias, null) as? KeyStore.PrivateKeyEntry
+                //
+                // Use getKey() instead of getEntry() — on the API 34
+                // emulator, `getEntry(keyAlias, null) as? PrivateKeyEntry`
+                // evaluates to null for Ed25519 keys generated via
+                // KeyPairGenerator(KEY_ALGORITHM_EC, "AndroidKeyStore")
+                // with ECGenParameterSpec("ed25519"). The cast path was
+                // the sole operation that differed between the passing
+                // Keystore tests (containsAlias, getCertificate) and the
+                // failing sign() tests in Run #18.
+                //
+                // getKey() returns the non-exportable PrivateKey reference
+                // directly. The actual key material remains inside the
+                // AndroidKeyStore secure enclave; Signature.initSign()
+                // delegates the signing operation to the Keystore provider.
+                val privateKey = keyStore.getKey(keyAlias, null) as? java.security.PrivateKey
                     ?: return null
                 val signature = Signature.getInstance("Ed25519")
-                signature.initSign(entry.privateKey)
+                signature.initSign(privateKey)
                 signature.update(data)
                 signature.sign()
             } else {
