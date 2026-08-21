@@ -24,6 +24,7 @@
 
 import { describe, it, expect } from 'vitest';
 import { readFileSync, existsSync } from 'node:fs';
+import { execSync } from 'node:child_process';
 import { join } from 'node:path';
 
 const PROJECT_ROOT = join(__dirname, '..', '..');
@@ -87,7 +88,6 @@ describe('S0.2.6-B: .env.example is tracked and contains no secrets', () => {
 describe('S0.2.6-B: .env is NOT tracked (secret safety)', () => {
   it('.env is not a tracked file', () => {
     // We check git ls-files — .env should not appear.
-    const { execSync } = require('node:child_process');
     const tracked = execSync('git ls-files .env', { cwd: PROJECT_ROOT, encoding: 'utf-8' }).trim();
     expect(tracked).toBe('');
   });

@@ -13,7 +13,7 @@
  */
 
 import { describe, it, expect } from 'vitest';
-import { readFileSync, existsSync } from 'node:fs';
+import { readFileSync, existsSync, readdirSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 
 const PROJECT_ROOT = join(__dirname, '..', '..');
@@ -205,7 +205,6 @@ describe('P4.1 Architecture enforcement — runtime lifecycle', () => {
 
 function listFiles(dir: string): string[] {
   if (!existsSync(dir)) return [];
-  const { readdirSync, statSync } = require('node:fs');
   const out: string[] = [];
   for (const entry of readdirSync(dir)) {
     const full = join(dir, entry);
