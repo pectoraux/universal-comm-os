@@ -87,9 +87,10 @@ jobs:
           chmod +x gradlew
 
       - name: Instrumentation tests
-        working-directory: android
         uses: reactivecircus/android-emulator-runner@v2
         with:
           api-level: 34
           arch: x86_64
-          script: ./gradlew connectedCheck --no-daemon --stacktrace
+          script: |
+            cd android
+            ./gradlew connectedCheck --no-daemon --stacktrace
