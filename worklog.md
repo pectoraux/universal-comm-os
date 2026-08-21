@@ -388,3 +388,144 @@ Stage Summary:
 - Workflow fix: the S0.2.6 worklog entry is appended BEFORE running the gate (not after). This eliminates the SHA-equality violation pattern from S0.2.3/S0.2.4/S0.2.5.
 - Test results: 436 tests pass (unchanged from S0.2.5; this is design-only). tsc --noEmit: exit 0.
 - P4-DESIGN is now READY FOR ARCHITECTURE REVIEW. The 7 questions in §13.1 (Q1-Q7) are the items the reviewer MUST resolve before P4.1 (BLE adapter) begins. The original implementation-detail questions (port 7878, BLE header size, SIG alias, foreground service subtype, ACCESS_FINE_LOCATION privacy, BLE mesh) are deferred to P4.1+ per §13.2.
+
+---
+Task ID: P4.1
+Agent: main (super-z)
+Task: Implement the Android Runtime Foundation — the execution environment that later transports (BLE, Wi-Fi Direct) will consume. P4.1 is infrastructure, NOT a consumer messaging interface. No BLE, no Wi-Fi Direct, no mesh routing, no Matrix, no SMS/email/WhatsApp. The Android runtime is an execution host and transport-capable node, NOT a new protocol layer.
+
+Work Log:
+- Verified baseline: LOCAL HEAD == origin/main == 943af94 (S0.2.6 P4-DESIGN revision). Worktree clean. 436 tests pass, tsc exit 0, execution evidence STATUS: VALID.
+- Read actual contracts from repository truth (NOT from prior reports):
+  - src/core/transport/Transport.ts — Transport interface (4 methods: isAvailable / send / onReceive / close?), TransportSendResult (4 canonical kinds: OK / UNAVAILABLE / NO_PEER / ERROR).
+  - src/server/NodeRuntime.ts — BundleStore interface (push / pop / size / peek / remove / has), createInMemoryBundleStore reference impl.
+  - src/core/delivery/DeliveryTracker.ts — DeliveryTracker interface (init / transition / get / snapshot / reset), canTransition, FORWARD_GRAPH (CREATED → ACCEPTED → QUEUED → RELAYED → GATEWAY_REACHED → EXTERNAL_ACCEPTED → DELIVERED → READ), FAILURE_STATES.
+  - src/core/delivery/types.ts — DeliveryState, DeliveryFailure, DeliveryEvent, DeliveryRecord.
+  - src/server/PrismaBundleStore.ts — serializeBundle / deserializeBundle (canonical JSON serialization — same pattern reused in AndroidBundleStore).
+  - src/core/bundle/CommunicationBundle.ts — createBundle (accepts bundle_id explicitly, otherwise generates UUID).
+  - src/core/bundle/types.ts — Proof interface (kind / signer / signature / payload_hash / ts), ProofKind (SENDER_SIGNATURE / RELAY_FORWARD / GATEWAY_TRANSCRIPT / DELIVERY_RECEIPT / READ_RECEIPT).
+  - src/core/capabilities/types.ts — TransportCapabilityType (includes BLE, WIFI, WIFI_AWARE), ResourceReport, NodeCapabilities.
+  - src/core/routing/types.ts — RouteHop, RoutePlan, PeerCapabilities, RoutingContext.
+- Implemented src/server/android/types.ts — the type definitions for the Android runtime foundation:
+  - AndroidRuntimeLifecycleState (CREATED / INITIALIZING / HYDRATING / RUNNING / DRAINING / STOPPED — ARCH-054).
+  - RUNTIME_LIFECYCLE_TRANSITIONS (forward-only transition table).
+  - RuntimeLifecycleError (thrown on illegal transitions — the host catches and returns false per Article XVIII §2).
+  - transitionRuntimeLifecycle() — the canonical transition function.
+  - ResourceReportSampler interface (Article XVIII §7 — observations, not protocol state).
+  - KeystoreAdapter interface (R4 — keys in Keystore, fail-closed when locked).
+  - PersistenceSnapshot interface (for re-hydration — R1, R3).
+  - RegisteredTransport interface.
+  - RuntimeLifecycleObserver interface (for test assertions).
+- Implemented src/server/android/AndroidBundleStore.ts — the protocol-level StoredBundle contract impl (Article XVIII §13):
+  - StoredBundleRecord (bundle_id / node_id / next_hop / bundle_json / priority / expires_at / queued_at / state — same shape as Prisma StoredBundle, satisfying the same protocol contract).
+  - ReceivedBundleRecord (P2 dedup — keyed by (node_id, bundle_id)).
+  - P1: push() is idempotent (UPSERT semantics — same bundle_id doesn't duplicate).
+  - P2: markReceived() dedupes by bundle_id only.
+  - P3: getExpiredBundleIds() — idempotent TTL sweeper support.
+  - P4: updateStateFromTracker() — the ONLY way to change state (no direct setter).
+  - P5: appendForwardingProof() — updates only bundle_json, no other field.
+  - P6: persistIfEnabled() + loadFromPersisted() — crash consistency (file-backed stub; real impl uses WAL).
+  - P7: getSchemaMigrations() — forward-only migrations.
+  - snapshot() — for deterministic re-hydration (R1, R3).
+  - serializeBundle() / deserializeBundle() — same canonical JSON as PrismaBundleStore (Article XVIII §10 — no transport framing persisted).
+- Implemented src/server/android/TransportRegistry.ts — transport registration against the existing Transport interface:
+  - register() — validates the Transport interface (4 methods) before accepting (Article XVIII §1).
+  - unregister() — calls close() (R5 callback ownership).
+  - send() — wraps transport.send() in try/catch (Article XVIII §2 — no throw across boundary).
+  - close() — unregisters all transports (for runtime shutdown — R5).
+- Implemented src/server/android/AndroidRuntimeHost.ts — the lifecycle owner:
+  - 6-state lifecycle (ARCH-054): CREATED → INITIALIZING → HYDRATING → RUNNING → DRAINING → STOPPED.
+  - transition() — canonical transition function, catches RuntimeLifecycleError and returns false (Article XVIII §2 — no throw across boundary). R6 concurrency safety via busy flag.
+  - start() / stop() — convenience methods.
+  - hydrate() — R1, R3 deterministic re-hydration from bundleStore.snapshot() ONLY (not from BLE/network/UI callbacks). Re-hydrates the DeliveryTracker via the canonical CREATED → ACCEPTED → QUEUED path (R7).
+  - startBackgroundWork() — R2 background execution. TTL sweeper (60s) + resource sampler (30s).
+  - runTtlSweeper() — R7: calls DeliveryTracker.transition(bundle_id, 'EXPIRED') for each expired bundle, THEN bundleStore.updateStateFromTracker() to persist. P3 idempotent.
+  - drain() — R5 prevents new work during DRAINING.
+  - cleanup() — R5 releases timers, transport registrations, receive handlers.
+  - registerTransport() / unregisterTransport() — R6 refuses if not RUNNING.
+  - onReceive() / receiveBundle() — R7: transitions via DeliveryTracker.transition() (CREATED → ACCEPTED → QUEUED → RELAYED → DELIVERED). P2 dedup via bundleStore.hasReceived().
+  - signPayload() — R4: uses Keystore, fail-closed when locked.
+  - getPublicKey() — R4: public key exportable.
+  - getResourceReport() — Article XVIII §7: observation only.
+  - getDeliveryTracker() / getBundleStore() / getTransportRegistry() — for test assertions.
+- Implemented src/server/android/TestAdapters.ts — TEST FIXTURES (NOT production):
+  - TestKeystoreAdapter — in-memory Ed25519 keypair via tweetnacl (Article IX — established crypto). lock()/unlock() for testing fail-closed behavior.
+  - TestResourceReportSampler — deterministic stub values. setBattery()/setUnavailable() for testing resource-aware behavior.
+  - Clearly named `Test*` per Article X (No Fake Implementations — test fixture carve-out).
+- Implemented src/server/android/conformance/FakeTransport.ts — deterministic test fixture implementing Transport:
+  - 4 canonical Transport methods (isAvailable / send / onReceive / close).
+  - 4 canonical TransportSendResult kinds (OK / UNAVAILABLE / NO_PEER / ERROR).
+  - NEVER throws (Article XVIII §2).
+  - Does NOT decrypt bundles (Article XVIII §3).
+  - Does NOT introduce new TransportSendResult kinds (Article XVIII §1).
+  - Supports duck-typed gossip() / onGossip() (ARCH-031).
+  - Records sentBundles / receivedBundles / gossipMessages for test assertions.
+  - _ingest() / _ingestGossip() — internal delivery hooks for test wiring.
+  - Clearly named `Fake` per Article X.
+- Implemented src/server/android/conformance/TransportConformanceSuite.ts — the mandatory conformance test framework (ARCH-055):
+  - runTransportConformanceSuite(factory, factoryName) — parameterized by TransportFactory.
+  - 11 conformance tests: bundle round-trip, framing boundary, malformed input rejection, duplicate handling, lifecycle cleanup, close/reopen semantics, opaque bundle handling, no identity mutation, no authorization mutation, no delivery-state mutation, resource-reporting isolation.
+  - fakeTransportFactory — the default factory (P4.1 proves the suite works). P4.2/P4.3 will register bleTransportFactory / wifiDirectTransportFactory.
+  - makeTestBundle() — creates a canonical CommunicationBundle (no Android-specific fields).
+- Wrote tests/architecture/p41-runtime-lifecycle.test.ts — 27 tests for R1-R7 invariants:
+  - ARCH-054 lifecycle state machine: starts in CREATED, forward transitions, refuses to skip states, refuses backward, STOPPED is terminal, throws on illegal transition via canonical function, observer notified.
+  - R1: process death recovery (restart re-hydrates, no duplicate delivery).
+  - R2: background execution (lifecycle owns callbacks, sweeper released on STOP).
+  - R3: deterministic rehydration (same snapshot → same state, no inference from callbacks).
+  - R4: key boundary (fail-closed when locked, signing succeeds when unlocked, public key exportable).
+  - R5: callback ownership (transports released on STOP, handlers released on STOP).
+  - R6: concurrency safety (refuses work before RUNNING, during DRAINING, concurrent transition serialization).
+  - R7: delivery authority (receiveBundle transitions via tracker, dedup, TTL sweeper via tracker, store does NOT mutate state directly).
+- Wrote tests/architecture/p41-persistence-contract.test.ts — 13 tests for P1-P7 invariants:
+  - P1: push idempotent, different bundle_ids → different records.
+  - P2: markReceived idempotent, dedup by bundle_id only.
+  - P3: TTL sweeper idempotent.
+  - P4: updateStateFromTracker is sole state mutator, idempotent.
+  - P5: appendForwardingProof updates only bundle_json.
+  - P6: snapshot consistent, remove leaves consistent state.
+  - P7: schema migrations forward-only.
+  - Cross-impl: state field uses canonical Article VI enum.
+- Wrote tests/architecture/p41-transport-conformance.test.ts — 14 tests:
+  - 11 conformance suite tests (runTransportConformanceSuite against fakeTransportFactory).
+  - 3 direct FakeTransport tests (explicitly a test fixture, never throws, 4 canonical kinds).
+- Wrote tests/architecture/p41-security-boundary.test.ts — 7 tests:
+  - R4: signing fails when locked (fail-closed).
+  - R4: signing succeeds when unlocked.
+  - R4: public key exportable (32 bytes).
+  - R4: no private key material in console output.
+  - Article XVIII §3: bundle payload is opaque (never decrypted).
+  - Article IX: no new cryptographic primitives (uses tweetnacl only).
+  - Runtime does NOT cache signing secret key in plaintext storage.
+- Wrote tests/architecture/p41-architecture-enforcement.test.ts — 8 static AST scan suites:
+  - A: No AndroidBundle / AndroidIdentity / AndroidDeliveryState / AndroidAuthorization types (Article XVIII §4).
+  - B: No forbidden gossip payload kinds (Article XVIII §11 — IDENTITY_ASSERTION / TRUST_ASSERTION / DELIVERY_STATE / AUTHZ_GRANT / BUNDLE_VARIANT / VERIFICATION_ASSERTION).
+  - C: No transport persists framing fields into BundleStore (Article XVIII §10).
+  - D: No transport claims sender authority in RELAY_FORWARD proofs (Article XVIII §12).
+  - E: Layer boundary — android/ imports only from @/core/*, @/server/* (Article I).
+  - F: No substitute cryptographic primitives (Article IX).
+  - G: Transport interface has exactly 4 canonical TransportSendResult kinds (Article XVIII §1).
+  - H: Android runtime lifecycle has exactly 6 canonical states (ARCH-054).
+- Added ARCH-054 (Android runtime lifecycle is canonical) to ARCHITECTURE_LEDGER.md.
+- Added ARCH-055 (TransportConformanceSuite is mandatory) to ARCHITECTURE_LEDGER.md.
+- Added ARCH-056 (Android Keystore boundary) to ARCHITECTURE_LEDGER.md.
+- Verified test suite + typecheck: 513 tests pass (77 new P4.1 + 436 prior), tsc exit 0.
+- The worklog entry is appended BEFORE running the gate (S0.2.6 workflow fix — no X → X+1 violation).
+
+Stage Summary:
+- Artifact: src/server/android/types.ts — lifecycle types (ARCH-054), KeystoreAdapter, ResourceReportSampler, PersistenceSnapshot.
+- Artifact: src/server/android/AndroidBundleStore.ts — protocol-level StoredBundle contract impl (P1-P7).
+- Artifact: src/server/android/TransportRegistry.ts — transport registration against Transport interface.
+- Artifact: src/server/android/AndroidRuntimeHost.ts — lifecycle owner (R1-R7), TTL sweeper, delivery authority, Keystore integration.
+- Artifact: src/server/android/TestAdapters.ts — test fixtures (TestKeystoreAdapter, TestResourceReportSampler).
+- Artifact: src/server/android/conformance/FakeTransport.ts — deterministic test transport.
+- Artifact: src/server/android/conformance/TransportConformanceSuite.ts — mandatory conformance framework (ARCH-055).
+- Artifact: tests/architecture/p41-runtime-lifecycle.test.ts — 27 R1-R7 tests.
+- Artifact: tests/architecture/p41-persistence-contract.test.ts — 13 P1-P7 tests.
+- Artifact: tests/architecture/p41-transport-conformance.test.ts — 14 conformance tests.
+- Artifact: tests/architecture/p41-security-boundary.test.ts — 7 security tests.
+- Artifact: tests/architecture/p41-architecture-enforcement.test.ts — 8 architecture enforcement suites.
+- Artifact: docs/architecture/ARCHITECTURE_LEDGER.md — ARCH-054 + ARCH-055 + ARCH-056 added.
+- Test results: 513 passed (77 new P4.1 + 436 prior) across 23 test files. 0 failures. tsc --noEmit: exit 0, 0 errors.
+- Architecture subset: 460 passed (FATAL).
+- Security subset: 11 passed (FATAL).
+- P4.1 is COMPLETE. Awaiting architecture review approval before P4.2 (BLE transport adapter) begins.
