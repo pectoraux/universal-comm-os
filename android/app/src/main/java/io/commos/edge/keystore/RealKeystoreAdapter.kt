@@ -113,15 +113,37 @@ class RealKeystoreAdapter(
 
     /**
      * Get the Ed25519 public key (exportable — it's public).
-     * The returned bytes are the raw 32-byte Ed25519 public key.
+     *
+     * Returns the raw 32-byte Ed25519 public key — the canonical
+     * tweetnacl/NaCl format expected by `nacl.sign.detached.verify()`
+     * in the TypeScript implementation (src/core/trust/Proof.ts:54).
+     *
+     * The Kotlin API 26-32 software path (Bouncy Castle
+     * Ed25519PublicKeyParameters.encoded) already returns the raw 32
+     * bytes; the API 33+ path now matches by extracting the raw key
+     * from the X.509 SubjectPublicKeyInfo returned by
+     * cert.publicKey.encoded.
+     *
+     * Contract: src/server/android/types.ts:170 — "The node's Ed25519
+     * public key (exportable; the secret key is not)."
+     *
+     * Pre-fix: API 33+ returned cert.publicKey.encoded directly
+     * (~44 bytes X.509 SubjectPublicKeyInfo) — INCONSISTENT with the
+     * API 26-32 path AND with the canonical TypeScript contract.
+     * Existing tests (isNotEmpty()) did not catch this representation
+     * regression.
      */
     fun getPublicKey(): ByteArray {
         if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.TIRAMISU) {
             val cert = keyStore.getCertificate(keyAlias)
                 ?: throw IllegalStateException("Keystore key not found: $keyAlias")
-            return cert.publicKey.encoded
+            return extractRawEd25519PublicKey(cert.publicKey.encoded)
+                ?: throw IllegalStateException(
+                    "Could not extract raw 32-byte Ed25519 public key from " +
+                        "SubjectPublicKeyInfo for alias: $keyAlias"
+                )
         } else {
-            // Software path — return the cached public key.
+            // Software path — Bouncy Castle returns raw 32 bytes.
             val kp = softwareKeyPair ?: throw IllegalStateException("Key not generated")
             return kp.public
         }
@@ -164,10 +186,38 @@ class RealKeystoreAdapter(
         }
     }
 
+    /**
+     * Whether the Keystore is currently unlocked and signing is available.
+     *
+     * Contract: src/server/android/types.ts:173 — "Whether the Keystore
+     * is currently unlocked and signing is available."
+     *
+     * Canonical caller: src/server/android/AndroidRuntimeHost.ts:428
+     *   `if (!this.keystore.isUnlocked()) return null; // R4 — fail-closed`
+     *
+     * On API 33+, the key is generated with
+     * setUserAuthenticationRequired(false) (line 65) — no biometric
+     * prompt is required for signing. Therefore, whenever the alias
+     * exists in AndroidKeyStore, signing IS available right now (no
+     * auth gate). `containsAlias(keyAlias)` correctly expresses this:
+     *   - alias exists → key is usable for signing → isUnlocked = true
+     *   - alias missing → no key → cannot sign → isUnlocked = false
+     *
+     * Pre-fix: used `getEntry(keyAlias, null) != null` — the SAME
+     * broken pattern Run #18 found in sign() (the getEntry() cast
+     * returned null on the API 34 emulator for Ed25519 keys generated
+     * via EC+ed25519). isUnlocked() would report false even when the
+     * key existed and signing was available — forcing the runtime to
+     * fail-closed (R4) and refuse to sign.
+     *
+     * On API 26-32, the software keypair is in process memory after
+     * generateKeyIfNeeded() — `softwareKeyPair != null` correctly
+     * indicates signing is available.
+     */
     fun isUnlocked(): Boolean {
         return try {
             if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.TIRAMISU) {
-                keyStore.getEntry(keyAlias, null) != null
+                keyStore.containsAlias(keyAlias)
             } else {
                 softwareKeyPair != null
             }

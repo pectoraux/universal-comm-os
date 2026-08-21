@@ -82,6 +82,59 @@ class KeystoreInstrumentationTest {
     }
 
     @Test
+    fun isUnlocked_returns_true_after_key_generation() {
+        val keystore = io.commos.edge.keystore.RealKeystoreAdapter()
+        keystore.generateKeyIfNeeded()
+        // Contract: src/server/android/types.ts:173 — isUnlocked() reports
+        // "Whether the Keystore is currently unlocked and signing is available."
+        // The canonical caller (AndroidRuntimeHost.ts:428) uses this to fail-closed:
+        //   `if (!this.keystore.isUnlocked()) return null; // R4`
+        // The key is generated with setUserAuthenticationRequired(false) so no
+        // biometric prompt is needed — whenever the alias exists, signing IS
+        // available. Therefore isUnlocked() must return true after generation.
+        //
+        // Pre-fix behavior: the API 33+ path used `getEntry(keyAlias, null) != null`
+        // which is the SAME broken pattern Run #18 found in sign() — getEntry()
+        // returned null on the API 34 emulator for Ed25519 keys generated via
+        // EC+ed25519, so isUnlocked() returned false even when the key was
+        // present and signing was possible, forcing the runtime to fail-closed
+        // (R4) and refuse to sign.
+        assertTrue(
+            "isUnlocked() must return true after generateKeyIfNeeded() " +
+                "(key exists, userAuthenticationRequired=false)",
+            keystore.isUnlocked()
+        )
+    }
+
+    @Test
+    fun getPublicKey_returns_canonical_raw_32_byte_Ed25519_key() {
+        val keystore = io.commos.edge.keystore.RealKeystoreAdapter()
+        keystore.generateKeyIfNeeded()
+        val pubkey = keystore.getPublicKey()
+        // Canonical contract (src/core/identity/keys.ts:23,30 + src/core/trust/Proof.ts:54):
+        //   nacl.sign.keyPair().publicKey returns the RAW 32-byte Ed25519 public key.
+        //   nacl.sign.detached.verify(payload, sig, signer_public_key) expects
+        //   signer_public_key to be these raw 32 bytes — NOT X.509 SubjectPublicKeyInfo.
+        //
+        // The KeystoreAdapter contract (src/server/android/types.ts:170) promises:
+        //   "The node's Ed25519 public key (exportable; the secret key is not)."
+        //
+        // The Kotlin API 26-32 path (Bouncy Castle Ed25519PublicKeyParameters.encoded)
+        // returns the raw 32 bytes. The API 33+ path must match — pre-fix it returned
+        // cert.publicKey.encoded (X.509 SubjectPublicKeyInfo, ~44 bytes), violating the
+        // canonical contract.
+        //
+        // This assertion catches the representation regression: if API 33+ ever
+        // returns the X.509-encoded form (~44 bytes) or any other format, the
+        // length will differ from 32 and this test fails.
+        assertEquals(
+            "Ed25519 public key must be exactly 32 bytes (canonical tweetnacl/NaCl format)",
+            32,
+            pubkey.size
+        )
+    }
+
+    @Test
     fun secrets_do_not_appear_in_logs() {
         val keystore = io.commos.edge.keystore.RealKeystoreAdapter()
         keystore.generateKeyIfNeeded()
